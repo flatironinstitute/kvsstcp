@@ -1,0 +1,99 @@
+<!DOCTYPE HTML>
+<html>
+  <head>
+    <style>
+      a:link {
+	  color: black;
+	  text-decoration: none;
+      }
+
+      a:visited {
+	  color: black;
+	  text-decoration: none;
+      }
+
+      a:hover {
+	  color: blue;
+	  text-decoration: none;
+      }
+
+      a:active {
+	  color: blue;
+	  text-decoration: none;
+      }
+
+      .kvsinfo {
+	  font-family: "Trebuchet MS", Arial, Helvetica, sans-serif;
+	  width: 100%%;
+	  border-collapse: collapse;
+      }
+
+      .kvsinfo td, .kvsinfo th {
+	  font-size: 1em;
+	  border: 1px solid #22305D;
+	  padding: 3px 7px 2px 7px;
+      }
+
+      .kvsinfo td.right {
+	  text-align: right;
+      }
+
+      .kvsinfo th {
+	  font-size: 1.1em;
+	  text-align: left;
+	  padding-top: 5px;
+	  padding-bottom: 4px;
+	  background-color: #3A509C;
+	  color: #ffffff;
+      }
+
+      .kvsinfo tr.alt td {
+	  color: #000000;
+	  background-color: #D7DCEB;
+      }
+    </style>
+    <script type='text/javascript'>
+     function sendvar(key, keyx, fmt) {
+       var v = document.getElementById('var_'+keyx).value;
+       ws.send('put\0'+key+'\0'+v+'\0'+fmt);
+       return false;
+     }
+
+     function main() {
+       if (!('WebSocket' in window)) {
+         // alert('WebSocket is supported by your Browser!');
+         return;
+       }
+       ws = new WebSocket('ws://%s:%d/');
+       
+       ws.onopen = function() {
+         // alert('Connected.');
+	 ws.send('dump');
+       };
+				
+       ws.onmessage = function (evt) { 
+         var received_msg = evt.data;
+	 if (received_msg == 'bye') {
+	   ws.send('bye');
+	   ws.close()
+	   received_msg = 'KVS server has shut down.';
+	 }
+	 document.getElementById('tellmeaboutit').innerHTML = received_msg;
+       };
+				
+       ws.onclose = function() {
+         // alert('Connection is closed.'); 
+	 ;
+       };
+     }
+     main();
+    </script>
+  </head>
+  <body>
+      <div id='sse'>
+         <a href='javascript:ws.send("dump")'>&orarr;</a>
+      </div>
+      <div id='tellmeaboutit' style='margin-top:10px'>
+      </div>
+   </body>
+</html>
