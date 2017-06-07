@@ -3,7 +3,7 @@ Key value storage server
 
 Inspired by networkspaces, which was in turn inspired by the Linda coordination language.
 
-Similar systems exist, the point of this one is to provide a simple to deployable and reasonably functional and efficient store that is easy to integrate with many different programming environments.
+Similar systems exist, the point of this one is to provide a simple to deploy and reasonably functional and efficient store that is easy to integrate with many different programming environments.
 
 "kvsstcp.py" contains the server and python client. See a comments throughout this file for a description of the line protocol and client methods. It should work with any stock python 2.7 or above.
 
