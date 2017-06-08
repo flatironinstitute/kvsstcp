@@ -14,6 +14,7 @@ logger = logging.getLogger('Key value store')
 #logger.config.dictConfig({'format': '%(asctime)s - %(levelname)s: %(message)s', 'filename': 'toodle', 'level': logging.DEBUG3})
 
 gc.disable()
+# This never gets reenabled, though turns out python does use perl-style reference counting, so this does only impact cyclic data structures
 
 # The line protocol is very simple:
 #
@@ -50,6 +51,8 @@ gc.disable()
 
 AsciiLenChars = 10 
 AsciiLenFormat = '%%%dd'%AsciiLenChars
+# Might be nicer to make this '%%0%dd'.
+# Nothing checks to make sure lengths don't exceed 9GB...
 
 def recvall(s, n):
     '''Wrapper to deal with partial recvs when we know there are N bytes to be had.'''
@@ -127,6 +130,7 @@ class KVSClient(object):
             coding = 'PYPK'
         else:
             # TODO: Is this silent stringification two clever by half?
+            # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
             if type(v) != str: v = repr(v)
             coding = 'ASTR'
             
@@ -143,6 +147,7 @@ class KVSClient(object):
 
     def _sendLenAndBytes(self, payload, doPickle=False):
         if doPickle: payload = PDS(payload)
+        # if not doPickle, this seems very likely to be wrong for anything but bytearrays (encoding, etc.)
         self.socket.sendall(AsciiLenFormat%len(payload))
         self.socket.sendall(payload)
 
@@ -183,6 +188,8 @@ class KVSRequestHandler(SocketServer.BaseRequestHandler):
                 break
             elif 'down' == op:
                 with self.server.clientLock:
+                    # This clientlock doesn't completely seem necessary (list.append is thread-safe), and in particular doesn't ensure that all clients are shutdown
+                    # It might be better to shutdown the server first, and then handle closing clients once serve_forever returns, using while clients.pop: shutdown_request
                     for c in self.server.clients:
                         logger.info('Shutdown closing: %s (%s)', repr(c), repr(c.getpeername()))
                         try: c.shutdown(socket.SHUT_RDWR)
@@ -339,7 +346,7 @@ class KVS(object):
                     self.rc += 1
                     s.release()
                     if delete: break 
-                if ww == []: self.waiters.pop(k)
+                if not ww: self.waiters.pop(k)
         self._doMonkeys('put', k)
 
     def view(self, k):
@@ -371,10 +378,13 @@ class KVSServerThread(Thread):
         self.startSem = Sem(0)
         self.start()
         self.startSem.acquire() # TODO: Is this really needed?
+        # I can't imagine why -- only if some other thread may be messing with self
+        # Also, it may be possible the release could happen first (since start was already called), which would be bad
 
     def run(self):
         self.startSem.release()
         self.server.serve_forever()
+        # May need a self.server.sever_close() here
 
 if '__main__' == __name__:
     import argparse
