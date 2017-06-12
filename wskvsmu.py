@@ -91,14 +91,19 @@ class KVSWaitThread(Thread):
             self.kvsc.close()
 
 class WebWaitThread(Thread):
-    def __init__(self, kvsaddr, ws, name='WebWaitThread'):
+    def __init__(self, kvsaddr, wslist, ws, name='WebWaitThread'):
         Thread.__init__(self, name=name)
         self.daemon = True
         self.ws = ws
         self.kvsc = kvsstcp.KVSClient(kvsaddr)
+        self.wslist = wslist
         self.start()
 
     def run(self):
+        self.ws.acceptone()
+        print 'post acceptone'
+        self.wslist.add(self.ws)
+
         def doDump():
             stats, waiters, puts = self.kvsc.dump()
             h = dump2html(stats, waiters, puts)
@@ -116,6 +121,7 @@ class WebWaitThread(Thread):
                     doDump()
                 else: raise Exception('Unknown op from websocket: "%s".'%repr(op))
         finally:
+            self.wslist.remove(self.ws)
             self.kvsc.close()
                 
 class WebSocketServer(object):
@@ -164,7 +170,10 @@ Sec-WebSocket-Accept: %s\r\n\r\n\
             self.client.sendall(p)
 
     def recv(self):
-        b = S.unpack('B', self.client.recv(1))[0]
+        r = self.client.recv(1)
+        if not r:
+            return 'bye'
+        b = S.unpack('B', r)[0]
         op = b & 0xF
         if op == 0x9:
             print >> sys.stderr, 'Got a ping'
@@ -198,6 +207,10 @@ class WebSocketList(object):
         with self.lock:
             self.wss.append(ws)
 
+    def remove(self, ws):
+        with self.lock:
+            self.wss.remove(ws)
+
     def list(self):
         with self.lock:
             return self.wss[:]
@@ -215,18 +228,17 @@ class FrontEndThread(Thread):
     def run(self):
         import StringIO
 
-        global lastFrontEnd
-        fes = [] # needed to hold references.
+        kvsserver = self.kvsserver
+        wslist = self.wslist
 
         class FrontEnd(SimpleHTTPServer.SimpleHTTPRequestHandler):
             def send_head(self):
                 if self.path.endswith('/kvsviewer'):
-                    global lastFrontEnd
-                    lastFrontEnd = self
-                    self.ws = WebSocketServer()
+                    ws = WebSocketServer()
+                    WebWaitThread(kvsserver, wslist, ws)
                     with open(os.path.join(ScriptDir, 'wskvspage.html')) as fep:
                         frontEndPage = fep.read()
-                    frontEndPage = frontEndPage%self.ws.sock.getsockname()
+                    frontEndPage = frontEndPage%ws.sock.getsockname()
                     self.send_response(200)
                     self.send_header('Content-type', 'text/html; charset=utf-8')
                     self.send_header('Content-length', str(len(frontEndPage)))
@@ -244,16 +256,7 @@ class FrontEndThread(Thread):
             self.urlfile.write('%s\n'%(myurl))
             self.urlfile.close()
 
-        while 1:
-            self.httpd.handle_request()
-            if lastFrontEnd:
-                print repr(lastFrontEnd)
-                lastFrontEnd.ws.acceptone()
-                print 'post acceptone'
-                WebWaitThread(self.kvsserver, lastFrontEnd.ws)
-                self.wslist.add(lastFrontEnd.ws)
-                #fes.append(lastFrontEnd)
-                lastFrontEnd = None
+        self.httpd.serve_forever()
 
 def main(kvsserver, urlfile=None, monitorkey='.webmonitor', monitorspec=':w'):
     wslist = WebSocketList()
