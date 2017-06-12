@@ -14,7 +14,7 @@ logger = logging.getLogger('Key value store')
 #logger.config.dictConfig({'format': '%(asctime)s - %(levelname)s: %(message)s', 'filename': 'toodle', 'level': logging.DEBUG3})
 
 gc.disable()
-# This never gets reenabled, though turns out python does use perl-style reference counting, so this does only impact cyclic data structures
+# This never gets reenabled, though python does use perl-style reference counting, so this only impacts cyclic data structures
 
 # The line protocol is very simple:
 #
