@@ -166,15 +166,18 @@ Sec-WebSocket-Accept: %s\r\n\r\n\
         self.lock = Lock()
 
     def send(self, p):
-        with self.lock:
-            lp = len(p)
-            if lp < 126:
-                self.client.sendall(S.pack('BB', 0x81, lp))
-            elif lp < 2**16:
-                self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
-            else:
-                self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
-            self.client.sendall(p)
+        try:
+            with self.lock:
+                lp = len(p)
+                if lp < 126:
+                    self.client.sendall(S.pack('BB', 0x81, lp))
+                elif lp < 2**16:
+                    self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
+                else:
+                    self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
+                self.client.sendall(p)
+        except:
+            pass
 
     def recv(self):
         r = self.client.recv(1)
