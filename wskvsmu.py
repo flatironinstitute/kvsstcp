@@ -2,8 +2,9 @@
 import argparse, base64, cgi, hashlib, kvsstcp, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
 from threading import current_thread, Lock, Thread
 
-ScriptDir = os.path.dirname(os.path.realpath(sys.argv[0]))
-varForm = open(ScriptDir+'/varFormTemplate.html').read()
+ScriptDir = os.path.dirname(__file__)
+with open(os.path.join(ScriptDir, 'varFormTemplate.html'), 'r') as vf:
+    varForm = vf.read()
 
 # The web monitor implements two conventions wrt keys:
 #
@@ -223,7 +224,8 @@ class FrontEndThread(Thread):
                     global lastFrontEnd
                     lastFrontEnd = self
                     self.ws = WebSocketServer()
-                    frontEndPage = open(ScriptDir+'/wskvspage.html').read()
+                    with open(os.path.join(ScriptDir, 'wskvspage.html')) as fep:
+                        frontEndPage = fep.read()
                     frontEndPage = frontEndPage%self.ws.sock.getsockname()
                     self.send_response(200)
                     self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -253,14 +255,18 @@ class FrontEndThread(Thread):
                 #fes.append(lastFrontEnd)
                 lastFrontEnd = None
 
-argp = argparse.ArgumentParser(description='Start a web monitor for a key-value storage server.')
-argp.add_argument('-m', '--monitorkey', default='.webmonitor', help='Key to use for the monitor.')
-argp.add_argument('-s', '--monitorspec', default=':w', help='What to monitor: comma separted list of "[key]:[gpvw]" specifications.')
-argp.add_argument('-u', '--urlfile', default=None, type=argparse.FileType('w'), help='Write url to this file.')
-argp.add_argument('kvsserver', metavar='host:port', help='KVS server address.')
-args = argp.parse_args()
+def main(kvsserver, urlfile=None, monitorkey='.webmonitor', monitorspec=':w'):
+    wslist = WebSocketList()
+    feThread = FrontEndThread(kvsserver, urlfile, wslist)
+    return KVSWaitThread(kvsserver, wslist, monitorkey, monitorspec)
 
-wslist = WebSocketList()
-feThread = FrontEndThread(args.kvsserver, args.urlfile, wslist)
-kvsThread = KVSWaitThread(args.kvsserver, wslist, args.monitorkey, args.monitorspec)
-kvsThread.join()
+if '__main__' == __name__:
+    argp = argparse.ArgumentParser(description='Start a web monitor for a key-value storage server.')
+    argp.add_argument('-m', '--monitorkey', default='.webmonitor', help='Key to use for the monitor.')
+    argp.add_argument('-s', '--monitorspec', default=':w', help='What to monitor: comma separted list of "[key]:[gpvw]" specifications.')
+    argp.add_argument('-u', '--urlfile', default=None, type=argparse.FileType('w'), help='Write url to this file.')
+    argp.add_argument('kvsserver', metavar='host:port', help='KVS server address.')
+    args = argp.parse_args()
+
+    kvsThread = main(args.kvsserver, args.urlfile, args.monitorkey, args.monitorspec)
+    kvsThread.join()
