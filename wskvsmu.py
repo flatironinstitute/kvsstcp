@@ -6,6 +6,9 @@ ScriptDir = os.path.dirname(__file__)
 with open(os.path.join(ScriptDir, 'varFormTemplate.html'), 'r') as vf:
     varForm = vf.read()
 
+def escapeHTML(x):
+    return cgi.escape(x)
+
 # The web monitor implements two conventions wrt keys:
 #
 # 1) A key starting with '.' is not displayed.
@@ -42,15 +45,20 @@ def dump2html(stats, waiters, puts):
         all.append([key, '', v])
     for k, vc, sample in puts:
         if k.startswith('.'): continue
+        k = escapeHTML(k)
         vc = str(vc)
-        encoding, val = sample
-        if encoding != 'ASTR':
-            val = repr((encoding, val))
-        if encoding == 'ASTR' and val[:6].lower() == '<html>':
-            val = val[6:]
+        # Try to undo dump.vrep
+        if len(sample) == 1 and sample[0][:6].lower() == '<html>':
+            val = sample[0][6:]
+        elif len(sample) == 2:
+            if sample[0] != 'ASTR':
+                val = '<em>%s (%d bytes)</em>'%(escapeHTML(sample[0]), sample[1])
+            else:
+                val = escapeHTML(sample[1])
+        elif len(sample) == 3:
+            val = escapeHTML(sample[2]) + ' <em>(%d bytes)</em>'%sample[1]
         else:
-            if type(val) == bytearray: val = val.decode('ascii') #TODO: is there a better way to cope with the internal byte array representation for values?
-            val = cgi.escape(val).encode('ascii', 'xmlcharrefreplace')
+            val = escapeHTML(repr(sample))
         all.append((k, vc, val))
     h += '<p><table class="kvsinfo"><caption>Current Contents</caption><thead><th>Key</th><th>Latest Value</th><th>Value Count</th></thead><tbody>'
     for k, vc, val in sorted(all):
@@ -101,7 +109,6 @@ class WebWaitThread(Thread):
 
     def run(self):
         self.ws.acceptone()
-        print 'post acceptone'
         self.wslist.add(self.ws)
 
         def doDump():
