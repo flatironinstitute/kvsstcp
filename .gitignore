@@ -1,2 +1,7 @@
 /build/
 *.pyc
+*.o
+/kvsLoop
+/kvsTestWIc
+/kvsTestWIf
+/kvsTestf

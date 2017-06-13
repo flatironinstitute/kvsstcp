@@ -1,13 +1,8 @@
 #!/usr/bin/env python
-import argparse, base64, cgi, hashlib, kvsstcp, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
+import argparse, base64, hashlib, json, kvsstcp, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
 from threading import current_thread, Lock, Thread
 
 ScriptDir = os.path.dirname(__file__)
-with open(os.path.join(ScriptDir, 'varFormTemplate.html'), 'r') as vf:
-    varForm = vf.read()
-
-def escapeHTML(x):
-    return cgi.escape(x)
 
 # The web monitor implements two conventions wrt keys:
 #
@@ -32,39 +27,16 @@ def escapeHTML(x):
 # 3) In all other cases, python's 'repr' of the (KVS encoding, value)
 # tuple is sent to the web client HTML escaped and encoded.
 #
-def dump2html(stats, waiters, puts):
-    all = []
-    h = '<table class="kvsinfo"><caption>General Statistics</caption><tr><th>Gets</th><th>Puts</th><th>Views</th><th>Waits</td><th>Acquires</th><th>Releases</th></tr><tr><td class="right">%d</td><td class="right">%d</td><td class="right">%d</td><td class="right">%d</td><td class="right">%d</td><td class="right">%d</td></tr></table>\n'%tuple(stats)
-    for x, (k, wc) in enumerate(sorted([k for k in waiters if '.' not in k])):
-        if k.startswith('.'): continue
-        if '?' in k:
-            key, fmt = k.split('?')
-            v = varForm.format(keyx=x, key=key, fmt=fmt)
-        else:
-            key, v = k, '[waiting: %d]'%wc
-        all.append([key, '', v])
-    for k, vc, sample in puts:
-        if k.startswith('.'): continue
-        k = escapeHTML(k)
-        vc = str(vc)
-        # Try to undo dump.vrep
-        if len(sample) == 1 and sample[0][:6].lower() == '<html>':
-            val = sample[0][6:]
-        elif len(sample) == 2:
-            if sample[0] != 'ASTR':
-                val = '<em>%s (%d bytes)</em>'%(escapeHTML(sample[0]), sample[1])
-            else:
-                val = escapeHTML(sample[1])
-        elif len(sample) == 3:
-            val = escapeHTML(sample[2]) + ' <em>(%d bytes)</em>'%sample[1]
-        else:
-            val = escapeHTML(repr(sample))
-        all.append((k, vc, val))
-    h += '<p><table class="kvsinfo"><caption>Current Contents</caption><thead><th>Key</th><th>Latest Value</th><th>Value Count</th></thead><tbody>'
-    for k, vc, val in sorted(all):
-        h += '<tr><td>%s</td><td>%s</td><td class="right">%s</td></tr>'%(k.split('?')[0], val, vc)
-    h += '</tbody></table>'
-    return h
+
+def jsonDefault(o):
+    if isinstance(o, bytearray):
+        return o.decode('latin-1')
+    return repr(o)
+
+def dump2json(kvsc):
+    r = json.dumps(kvsc.dump(), ensure_ascii = False, check_circular = False, encoding = 'latin-1', default = jsonDefault)
+    if isinstance(r, unicode): r = r.encode('latin-1')
+    return r
 
 def recvall(s, n):
     d = ''
@@ -89,9 +61,8 @@ class KVSWaitThread(Thread):
         try: 
             while 1:
                 r = self.kvsc.get(self.mk, False)
-                stats, waiters, puts = self.kvsc.dump()
-                h = dump2html(stats, waiters, puts)
-                self.wslist.broadcast(h)
+                j = dump2json(self.kvsc)
+                self.wslist.broadcast(j)
         finally:
             self.wslist.broadcast('bye')
             self.kvsc.close()
@@ -114,21 +85,20 @@ class WebWaitThread(Thread):
 
         self.wslist.add(self)
 
-        def doDump():
-            stats, waiters, puts = self.kvsc.dump()
-            h = dump2html(stats, waiters, puts)
-            self.ws.send(h)
-
         try:
             while self.active:
                 op = self.ws.recv()
+                if op == '': continue
                 if op == 'bye': break
-                elif op == 'dump': doDump()
+                elif op == 'dump':
+                    j = dump2json(self.kvsc)
+                    self.ws.send(j)
                 elif op.startswith('put\x00'):
-                    d, k, v, fmt = op.split('\x00')
-                    if fmt: v = fmt%v
-                    self.kvsc.put('%s?%s'%(k, fmt), v, False)
-                    doDump()
+                    d, key, v = op.split('\x00')
+                    if '?' in key:
+                        k, fmt = key.split('?')
+                        if fmt: v = fmt%v
+                    self.kvsc.put(key, v, False)
                 else: raise Exception('Unknown op from websocket: "%s".'%repr(op))
         finally:
             self.wslist.remove(self)
