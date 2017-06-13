@@ -71,6 +71,7 @@
 	 ws.send('dump');
        };
 				
+       var t = document.getElementById('tellmeaboutit');
        ws.onmessage = function (evt) { 
          var received_msg = evt.data;
 	 if (received_msg == 'bye') {
@@ -78,18 +79,16 @@
 	   ws.close()
 	   received_msg = 'KVS server has shut down.';
 	 }
-	 document.getElementById('tellmeaboutit').innerHTML = received_msg;
+	 t.innerHTML = received_msg;
        };
 				
        ws.onclose = function() {
-         // alert('Connection is closed.'); 
-	 ;
+         t.innerHTML = "KVS web server has disappeared.";
        };
      }
-     main();
     </script>
   </head>
-  <body>
+  <body onload="main()">
       <div id='sse'>
          <a href='javascript:ws.send("dump")'>&orarr;</a>
       </div>

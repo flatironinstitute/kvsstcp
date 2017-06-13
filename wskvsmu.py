@@ -91,11 +91,9 @@ class KVSWaitThread(Thread):
                 r = self.kvsc.get(self.mk, False)
                 stats, waiters, puts = self.kvsc.dump()
                 h = dump2html(stats, waiters, puts)
-                for ws in self.wslist.list():
-                    ws.send(h)
+                self.wslist.broadcast(h)
         finally:
-            for ws in self.wslist.list():
-                ws.send('bye')
+            self.wslist.broadcast('bye')
             self.kvsc.close()
 
 class WebWaitThread(Thread):
@@ -105,11 +103,16 @@ class WebWaitThread(Thread):
         self.ws = ws
         self.kvsc = kvsstcp.KVSClient(kvsaddr)
         self.wslist = wslist
+        self.active = True
         self.start()
 
     def run(self):
-        self.ws.acceptone()
-        self.wslist.add(self.ws)
+        try:
+            self.ws.acceptone()
+        except socket.error, msg:
+            return
+
+        self.wslist.add(self)
 
         def doDump():
             stats, waiters, puts = self.kvsc.dump()
@@ -117,7 +120,7 @@ class WebWaitThread(Thread):
             self.ws.send(h)
 
         try:
-            while 1:
+            while self.active:
                 op = self.ws.recv()
                 if op == 'bye': break
                 elif op == 'dump': doDump()
@@ -128,8 +131,15 @@ class WebWaitThread(Thread):
                     doDump()
                 else: raise Exception('Unknown op from websocket: "%s".'%repr(op))
         finally:
-            self.wslist.remove(self.ws)
+            self.wslist.remove(self)
             self.kvsc.close()
+            self.ws.close()
+
+    def send(self, p):
+        try:
+            self.ws.send(p)
+        except socket.error, msg:
+            self.active = False
                 
 class WebSocketServer(object):
     wsmagic = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -144,10 +154,12 @@ Sec-WebSocket-Accept: %s\r\n\r\n\
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind((socket.gethostname(), 0))
-        self.sock.listen(5)
+        self.sock.settimeout(60)
+        self.sock.listen(1)
 
     def acceptone(self):
         client, address = self.sock.accept()
+        self.sock.close()
 
         # read the header (ends with '\r\n\r\n')
         header = ''
@@ -166,23 +178,19 @@ Sec-WebSocket-Accept: %s\r\n\r\n\
         self.lock = Lock()
 
     def send(self, p):
-        try:
-            with self.lock:
-                lp = len(p)
-                if lp < 126:
-                    self.client.sendall(S.pack('BB', 0x81, lp))
-                elif lp < 2**16:
-                    self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
-                else:
-                    self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
-                self.client.sendall(p)
-        except:
-            pass
+        with self.lock:
+            lp = len(p)
+            if lp < 126:
+                self.client.sendall(S.pack('BB', 0x81, lp))
+            elif lp < 2**16:
+                self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
+            else:
+                self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
+            self.client.sendall(p)
 
     def recv(self):
         r = self.client.recv(1)
-        if not r:
-            return 'bye'
+        if not r: return 'bye'
         b = S.unpack('B', r)[0]
         op = b & 0xF
         if op == 0x9:
@@ -208,22 +216,30 @@ Sec-WebSocket-Accept: %s\r\n\r\n\
             print >>sys.stderr, 'ws recv header byte: %02x'%b
             return ''
 
+    def close(self):
+        self.client.close()
+
 class WebSocketList(object):
     def __init__(self):
         self.lock = Lock()
-        self.wss = []
+        self.wss = set() # of WebWaitThread
     
     def add(self, ws):
         with self.lock:
-            self.wss.append(ws)
+            self.wss.add(ws)
 
     def remove(self, ws):
         with self.lock:
             self.wss.remove(ws)
 
-    def list(self):
+    def __iter__(self):
         with self.lock:
-            return self.wss[:]
+            return iter(self.wss.copy())
+
+    def broadcast(self, p):
+        for ws in self:
+            # TODO: add timeout for sending to avoid blocking, or lift to separate thread
+            ws.send(p)
 
 lastFrontEnd = None
 class FrontEndThread(Thread):
