@@ -381,16 +381,11 @@ class KVSServerThread(Thread):
         self.server.clientLock = Lock()
         self.server.clients = []
         self.server.kvs = KVS()
-        self.startSem = Sem(0)
         self.start()
-        self.startSem.acquire() # TODO: Is this really needed?
-        # I can't imagine why -- only if some other thread may be messing with self
-        # Also, it may be possible the release could happen first (since start was already called), which would be bad
 
     def run(self):
-        self.startSem.release()
         self.server.serve_forever()
-        # May need a self.server.sever_close() here
+        self.server.server_close()
 
 if '__main__' == __name__:
     import argparse
@@ -416,11 +411,15 @@ if '__main__' == __name__:
         args.addrfile.write(addr)
         args.addrfile.close()
 
-    if args.execcmd:
-        import subprocess
-        os.environ['KVSSTCP_HOST'] = t.cinfo[0]
-        os.environ['KVSSTCP_PORT'] = str(t.cinfo[1])
-        subprocess.call(args.execcmd, shell=True)
-        t.server.shutdown()
-    else:
-        t.join()
+    try:
+        if args.execcmd:
+            import subprocess
+            os.environ['KVSSTCP_HOST'] = t.cinfo[0]
+            os.environ['KVSSTCP_PORT'] = str(t.cinfo[1])
+            subprocess.call(args.execcmd, shell=True)
+        else:
+            while t.isAlive():
+                t.join(60)
+    finally:
+        t.server.shutdown();
+    t.join()

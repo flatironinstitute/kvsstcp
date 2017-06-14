@@ -47,13 +47,14 @@ def recvall(s, n):
     return d
 
 class KVSWaitThread(Thread):
-    def __init__(self, kvsaddr, wslist, mk, spec, name='KVSClientThread'):
+    def __init__(self, kvsaddr, wslist, mk, spec, frontend, name='KVSClientThread'):
         Thread.__init__(self, name=name)
         self.daemon = True
         self.mk = mk
         self.wslist = wslist
         self.kvsc = kvsstcp.KVSClient(kvsaddr)
         self.kvsc.monkey(mk, spec)
+        self.frontend = frontend
         self.start()
 
     def run(self):
@@ -63,8 +64,9 @@ class KVSWaitThread(Thread):
                 j = dump2json(self.kvsc)
                 self.wslist.broadcast(j)
         finally:
-            self.wslist.broadcast('bye')
+            self.wslist.broadcast('bye', True)
             self.kvsc.close()
+            self.frontend.stop()
 
 class WebSocketServer(object):
     def __init__(self, kvsaddr, wslist, ws):
@@ -95,16 +97,17 @@ class WebSocketServer(object):
             kvsc.close()
             self.close()
 
-    def send(self, p):
+    def send(self, p, end = False):
         try:
             with self.lock:
+                op = 8 if end else 1
                 lp = len(p)
                 if lp < 126:
-                    self.client.sendall(S.pack('BB', 0x81, lp))
+                    self.client.sendall(S.pack('BB', 0x80 | op, lp))
                 elif lp < 2**16:
-                    self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
+                    self.client.sendall(S.pack('!BBH', 0x80 | op, 126, lp))
                 else:
-                    self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
+                    self.client.sendall(S.pack('!BBQ', 0x80 | op, 127, lp))
                 self.client.sendall(p)
         except socket.error, msg:
             self.active = False
@@ -160,10 +163,10 @@ class WebSocketList(object):
         with self.lock:
             return iter(self.wss.copy())
 
-    def broadcast(self, p):
+    def broadcast(self, p, end = False):
         for ws in self:
             # TODO: add timeout for sending to avoid blocking, or lift to separate thread
-            ws.send(p)
+            ws.send(p, end)
 
 class FrontEnd(SimpleHTTPServer.SimpleHTTPRequestHandler):
     html = pkg_resources.resource_filename('kvsstcp', 'wskvspage.html')
@@ -222,11 +225,16 @@ class FrontEndThread(Thread):
 
     def run(self):
         self.httpd.serve_forever()
+        self.httpd.server_close()
+
+    def stop(self):
+        self.httpd.shutdown()
 
 def main(kvsserver, urlfile=None, monitorkey='.webmonitor', monitorspec=':w', addr=(socket.gethostname(), 0), **args):
     wslist = WebSocketList()
-    FrontEndThread(kvsserver, addr, urlfile, wslist)
-    return KVSWaitThread(kvsserver, wslist, monitorkey, monitorspec)
+    fe = FrontEndThread(kvsserver, addr, urlfile, wslist)
+    kvs = KVSWaitThread(kvsserver, wslist, monitorkey, monitorspec, fe)
+    return (fe, kvs)
 
 if '__main__' == __name__:
     argp = argparse.ArgumentParser(description='Start a web monitor for a key-value storage server.')
@@ -235,9 +243,16 @@ if '__main__' == __name__:
     argp.add_argument('-u', '--urlfile', default=None, type=argparse.FileType('w'), help='Write url to this file.')
     argp.add_argument('-b', '--bind', default=socket.gethostname(), type=str, help='HTTP IP to listen on (hostname).')
     argp.add_argument('-p', '--port', default=0, type=int, help='HTTP port to listen on (random).')
-    argp.add_argument('kvsserver', metavar='host:port', help='KVS server address.')
+    kvshost = os.environ.has_key('KVSSTCP_HOST')
+    kvsport = os.environ.has_key('KVSSTCP_PORT')
+    argp.add_argument('kvsserver', metavar='host:port', nargs='?' if kvshost and kvsport else None, help='KVS server address.')
     args = argp.parse_args()
 
     args.addr = (args.bind, args.port)
-    kvsThread = main(**args.__dict__)
-    kvsThread.join()
+    (fe, kvs) = main(**args.__dict__)
+    try:
+        while fe.isAlive():
+            fe.join(60)
+    finally:
+        fe.stop()
+    fe.join()
