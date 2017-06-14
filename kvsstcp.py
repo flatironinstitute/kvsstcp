@@ -210,6 +210,12 @@ class KVSRequestHandler(SocketServer.BaseRequestHandler):
             #DEBUGOFF            logger.debug('(%s) %s key "%s"'%(whoAmI, reqtxt, key))
             if 'get_' == op:
                 (encoding, val) = kvs.get(key)
+                # If the client closes the connection (cleanly or otherwise)
+                # while we're waiting in the above get, we don't find out until
+                # the get completes.  Ideally we'd notice the close and cancel
+                # the get.  (This would still leave a race condition where the
+                # value is lost if the client closes after the get completes
+                # but before the send.)
                 req.sendall(encoding)
                 req.sendall(AsciiLenFormat%(len(val)))
                 req.sendall(val)

@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 import argparse, base64, hashlib, json, kvsstcp, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
 from threading import current_thread, Lock, Thread
-
-ScriptDir = os.path.dirname(__file__)
+import pkg_resources
 
 # The web monitor implements two conventions wrt keys:
 #
@@ -67,103 +66,58 @@ class KVSWaitThread(Thread):
             self.wslist.broadcast('bye')
             self.kvsc.close()
 
-class WebWaitThread(Thread):
-    def __init__(self, kvsaddr, wslist, ws, name='WebWaitThread'):
-        Thread.__init__(self, name=name)
-        self.daemon = True
-        self.ws = ws
-        self.kvsc = kvsstcp.KVSClient(kvsaddr)
-        self.wslist = wslist
+class WebSocketServer(object):
+    def __init__(self, kvsaddr, wslist, ws):
+        self.client = ws
+        self.lock = Lock()
         self.active = True
-        self.start()
 
-    def run(self):
-        try:
-            self.ws.acceptone()
-        except socket.error, msg:
-            return
-
-        self.wslist.add(self)
+        kvsc = kvsstcp.KVSClient(kvsaddr)
+        wslist.add(self)
 
         try:
             while self.active:
-                op = self.ws.recv()
-                if op == '': continue
-                if op == 'bye': break
+                op = self.recv()
+                if not op: pass
+                elif op == 'bye': break
                 elif op == 'dump':
-                    j = dump2json(self.kvsc)
-                    self.ws.send(j)
+                    j = dump2json(kvsc)
+                    self.send(j)
                 elif op.startswith('put\x00'):
                     d, key, v = op.split('\x00')
                     if '?' in key:
                         k, fmt = key.split('?')
                         if fmt: v = fmt%v
-                    self.kvsc.put(key, v, False)
+                    kvsc.put(key, v, False)
                 else: raise Exception('Unknown op from websocket: "%s".'%repr(op))
         finally:
-            self.wslist.remove(self)
-            self.kvsc.close()
-            self.ws.close()
+            wslist.remove(self)
+            kvsc.close()
+            self.close()
 
     def send(self, p):
         try:
-            self.ws.send(p)
+            with self.lock:
+                lp = len(p)
+                if lp < 126:
+                    self.client.sendall(S.pack('BB', 0x81, lp))
+                elif lp < 2**16:
+                    self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
+                else:
+                    self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
+                self.client.sendall(p)
         except socket.error, msg:
             self.active = False
-                
-class WebSocketServer(object):
-    wsmagic = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-
-    handshake = '\
-HTTP/1.1 101 Switching Protocols\r\n\
-Upgrade: websocket\r\n\
-Connection: Upgrade\r\n\
-Sec-WebSocket-Accept: %s\r\n\r\n\
-'
-
-    def __init__(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind((socket.gethostname(), 0))
-        self.sock.settimeout(60)
-        self.sock.listen(1)
-
-    def acceptone(self):
-        client, address = self.sock.accept()
-        self.sock.close()
-
-        # read the header (ends with '\r\n\r\n')
-        header = ''
-        while 1:
-            header += client.recv(16)
-            if header.find('\r\n\r\n') != -1: break
-
-        req, data = header.split('\r\n\r\n', 1)
-        assert data == ''
-        x = req.index('Sec-WebSocket-Key: ') + 19 # 19 is the length of the search string.
-        y = req.index('\r\n', x)
-        k = req[x:y]
-        reply = WebSocketServer.handshake%(base64.b64encode(hashlib.sha1(k + WebSocketServer.wsmagic).digest()))
-        client.sendall(reply)
-        self.client = client
-        self.lock = Lock()
-
-    def send(self, p):
-        with self.lock:
-            lp = len(p)
-            if lp < 126:
-                self.client.sendall(S.pack('BB', 0x81, lp))
-            elif lp < 2**16:
-                self.client.sendall(S.pack('!BBH', 0x81, 126, lp))
-            else:
-                self.client.sendall(S.pack('!BBQ', 0x81, 127, lp))
-            self.client.sendall(p)
 
     def recv(self):
         r = self.client.recv(1)
         if not r: return 'bye'
         b = S.unpack('B', r)[0]
         op = b & 0xF
-        if op == 0x9:
+        if op == 0x8:
+            assert b & 0x80
+            return 'bye'
+        elif op == 0x9:
             print >> sys.stderr, 'Got a ping'
             #TODO: Do something here
             return ''
@@ -211,52 +165,67 @@ class WebSocketList(object):
             # TODO: add timeout for sending to avoid blocking, or lift to separate thread
             ws.send(p)
 
-lastFrontEnd = None
+class FrontEnd(SimpleHTTPServer.SimpleHTTPRequestHandler):
+    html = pkg_resources.resource_filename('kvsstcp', 'wskvspage.html')
+
+    wsmagic = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+    handshake = '\
+HTTP/1.1 101 Switching Protocols\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Accept: %s\r\n\r\n\
+'
+
+    def send_head(self):
+        if self.headers.get('upgrade', None) == 'websocket' and self.headers.get('sec-websocket-protocol', None) == 'kvs' and self.headers.get('origin') == self.server.base_url:
+            k = self.headers.get('sec-websocket-key')
+            reply = FrontEnd.handshake%(base64.b64encode(hashlib.sha1(k + FrontEnd.wsmagic).digest()))
+            self.request.sendall(reply)
+            WebSocketServer(self.server.kvsserver, self.server.wslist, self.request)
+            return None
+
+        elif self.path == '/kvsviewer':
+            f = open(FrontEnd.html, 'r')
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            fs = os.fstat(f.fileno())
+            self.send_header("content-length", str(fs.st_size))
+            self.send_header("last-modified", self.date_time_string(fs.st_mtime))
+            self.end_headers()
+            return f
+            
+        else:
+            self.send_error(404, 'Not recognized')
+            return None
+
+class ThreadingTCPServer(SocketServer.ThreadingTCPServer):
+    daemon_threads = True
+
 class FrontEndThread(Thread):
-    def __init__(self, kvsserver, urlfile, wslist, name='FrontEndThread'):
+    def __init__(self, kvsserver, addr, urlfile, wslist, name='FrontEndThread'):
         Thread.__init__(self, name=name)
         self.daemon = True
-        self.kvsserver = kvsserver
-        self.urlfile = urlfile
-        self.wslist = wslist
+        self.httpd = ThreadingTCPServer(addr, FrontEnd)
+        if addr[1]: self.httpd.allow_reuse_address = True
+        self.httpd.base_url = 'http://%s:%s'%(self.httpd.server_address)
+
+        myurl = self.httpd.base_url + '/kvsviewer'
+        print >>sys.stderr, 'front end at: '+myurl
+        if urlfile:
+            urlfile.write('%s\n'%(myurl))
+            urlfile.close()
+
+        self.httpd.kvsserver = kvsserver
+        self.httpd.wslist = wslist
         self.start()
 
     def run(self):
-        import StringIO
-
-        kvsserver = self.kvsserver
-        wslist = self.wslist
-
-        class FrontEnd(SimpleHTTPServer.SimpleHTTPRequestHandler):
-            def send_head(self):
-                if self.path.endswith('/kvsviewer'):
-                    ws = WebSocketServer()
-                    WebWaitThread(kvsserver, wslist, ws)
-                    with open(os.path.join(ScriptDir, 'wskvspage.html')) as fep:
-                        frontEndPage = fep.read()
-                    frontEndPage = frontEndPage%ws.sock.getsockname()
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/html; charset=utf-8')
-                    self.send_header('Content-length', str(len(frontEndPage)))
-                    self.end_headers()
-
-                    return StringIO.StringIO(frontEndPage)
-                else:
-                    self.send_error(404, 'Not recognized')
-                    return None
-
-        self.httpd = SocketServer.TCPServer((socket.gethostname(), 0), FrontEnd)
-        myurl = 'http://%s:%s/kvsviewer'%(self.httpd.server_address)
-        print >>sys.stderr, 'front end at: '+myurl
-        if self.urlfile:
-            self.urlfile.write('%s\n'%(myurl))
-            self.urlfile.close()
-
         self.httpd.serve_forever()
 
-def main(kvsserver, urlfile=None, monitorkey='.webmonitor', monitorspec=':w'):
+def main(kvsserver, urlfile=None, monitorkey='.webmonitor', monitorspec=':w', addr=(socket.gethostname(), 0), **args):
     wslist = WebSocketList()
-    feThread = FrontEndThread(kvsserver, urlfile, wslist)
+    FrontEndThread(kvsserver, addr, urlfile, wslist)
     return KVSWaitThread(kvsserver, wslist, monitorkey, monitorspec)
 
 if '__main__' == __name__:
@@ -264,8 +233,11 @@ if '__main__' == __name__:
     argp.add_argument('-m', '--monitorkey', default='.webmonitor', help='Key to use for the monitor.')
     argp.add_argument('-s', '--monitorspec', default=':w', help='What to monitor: comma separted list of "[key]:[gpvw]" specifications.')
     argp.add_argument('-u', '--urlfile', default=None, type=argparse.FileType('w'), help='Write url to this file.')
+    argp.add_argument('-b', '--bind', default=socket.gethostname(), type=str, help='HTTP IP to listen on (hostname).')
+    argp.add_argument('-p', '--port', default=0, type=int, help='HTTP port to listen on (random).')
     argp.add_argument('kvsserver', metavar='host:port', help='KVS server address.')
     args = argp.parse_args()
 
-    kvsThread = main(args.kvsserver, args.urlfile, args.monitorkey, args.monitorspec)
+    args.addr = (args.bind, args.port)
+    kvsThread = main(**args.__dict__)
     kvsThread.join()

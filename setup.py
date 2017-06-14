@@ -5,4 +5,4 @@ setup(name='kvsstcp', version='0',
     long_description=open("Readme.md").read(),
     packages=['kvsstcp'],
     package_dir={'kvsstcp':'.'},
-    package_data={'kvsstcp':['varFormTemplate.html', 'wskvspage.html']})
+    package_data={'kvsstcp':['wskvspage.html']})

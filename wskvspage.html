@@ -24,7 +24,7 @@
 
       .kvsinfo {
           font-family: "Trebuchet MS", Arial, Helvetica, sans-serif;
-          width: 100%%;
+          width: 100%;
           border-collapse: collapse;
       }
 
@@ -84,7 +84,7 @@
       }
       var byKey = by(function(d) { return d.key; });
       var byVal = by(function(d) { return d.val || d.len; });
-      var byCount = by(function(d) { return d.waiters || d.count; });
+      var byCount = by(function(d) { return -d.waiters || +d.count; });
 
       var keytable, keytemplate;
       var data = [];
@@ -98,7 +98,7 @@
         inputs = {};
         var next = keytable.firstChild;
         for (var d of data) {
-          if (d.key.startsWith('.'))
+          if (d.key.startsWith('.') || d.key in keys)
             continue;
           var row;
           if (d.key in oldKeys) {
@@ -163,7 +163,7 @@
           // alert('WebSocket is supported by your Browser!');
           return;
         }
-        ws = new WebSocket('ws://%s:%d/');
+        ws = new WebSocket('ws://' + document.location.host + '/', 'kvs');
 
         ws.onopen = function() {
           // alert('Connected.');
