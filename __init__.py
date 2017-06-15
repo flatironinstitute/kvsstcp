@@ -1,1 +1,2 @@
-from kvsstcp import *
+from .kvsclient import KVSClient
+from .kvsstcp import KVSServerThread

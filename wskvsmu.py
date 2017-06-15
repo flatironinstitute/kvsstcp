@@ -1,7 +1,9 @@
 #!/usr/bin/env python
-import argparse, base64, hashlib, json, kvsstcp, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
+import argparse, base64, hashlib, json, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
 from threading import current_thread, Lock, Thread
 import pkg_resources
+
+import kvsclient as kvsstcp
 
 # The web monitor implements two conventions wrt keys:
 #
