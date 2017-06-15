@@ -98,7 +98,7 @@
         inputs = {};
         var next = keytable.firstChild;
         for (var d of data) {
-          if (d.key.startsWith('.') || d.key in keys)
+          if (d.key[0] === '.' || d.key in keys)
             continue;
           var row;
           if (d.key in oldKeys) {
@@ -137,7 +137,7 @@
               t.className = 'type';
               t.textContent = d.type;
               cell.insertBefore(t, cell.firstChild);
-            } else if (d.val.toLowerCase().startsWith('<html>')) {
+            } else if (d.val.substr(0,6).toLowerCase() === '<html>') {
               cell.innerHTML = d.val.substr(6);
             }
             row.children[2].textContent = d.count;
