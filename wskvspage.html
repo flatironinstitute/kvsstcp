@@ -202,7 +202,7 @@
         };
 
         ws.onclose = function() {
-          document.getElementById('tellmeaboutit').textContent = "KVS server has shut down.";
+          document.getElementById('bar').textContent = "KVS server has shut down.";
         };
 
         return true;
@@ -222,10 +222,10 @@
   </head>
   <body onload="main()">
     <form onsubmit="send(event)">
-      <div>
+      <div id='bar'>
         <a href='javascript:ws.send("dump")'>&orarr;</a>
       </div>
-      <div id='tellmeaboutit' style='margin-top:10px'>
+      <div style='margin-top:10px'>
         <table class="kvsinfo">
           <caption>General Statistics</caption>
           <tr><th>Gets</th><th>Puts</th><th>Views</th><th>Waits</td><th>Acquires</th><th>Releases</th></tr>
