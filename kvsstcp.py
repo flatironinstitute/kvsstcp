@@ -221,7 +221,7 @@ class KVS(object):
 class KVSServerThreadException(Exception): pass
 
 class KVSServerThread(Thread):
-    def __init__(self, host='', port=0, name='KVSServerThread'):
+    def __init__(self, host=None, port=0, name='KVSServerThread'):
         Thread.__init__(self, name=name)
 
         if not host: host = socket.gethostname()
@@ -273,9 +273,10 @@ if '__main__' == __name__:
     try:
         if args.execcmd:
             import subprocess
-            os.environ['KVSSTCP_HOST'] = t.cinfo[0]
-            os.environ['KVSSTCP_PORT'] = str(t.cinfo[1])
-            subprocess.call(args.execcmd, shell=True)
+            env = os.environ.copy()
+            env['KVSSTCP_HOST'] = t.cinfo[0]
+            env['KVSSTCP_PORT'] = str(t.cinfo[1])
+            subprocess.call(args.execcmd, shell=True, env=env)
         else:
             while t.isAlive():
                 t.join(60)
