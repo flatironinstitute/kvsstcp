@@ -1,5 +1,6 @@
 import os
 import socket
+import sys
 from cPickle import dumps as PDS, loads as PLS
 
 from kvscommon import *
