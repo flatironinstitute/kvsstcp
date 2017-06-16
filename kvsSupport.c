@@ -41,7 +41,7 @@ dovec(ssize_t (*func)(), int fd, struct iovec *iov, int iovcnt, ssize_t bytes)
 
   while (1) {
     ssize_t	done = func(fd, iov+vx, iovcnt-vx);
-    if (-1 == done) {
+    if (done <= 0) {
       char	*name = "readv";
 
       if (func == writev) name = "writev";
