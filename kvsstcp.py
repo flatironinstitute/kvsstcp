@@ -19,16 +19,33 @@ logger = logging.getLogger('Key value store')
 # There are some cyclic references in in asyncio, handlers, waiters, etc., so I'm re-enabling this:
 #gc.disable()
 
-# Adds buffered input of known-size blocks
-class KVSDispatcher(asyncore.dispatcher_with_send):
+# Adds buffered output and input of known-size blocks (like dispatcher_with_send)
+class KVSDispatcher(asyncore.dispatcher):
     def __init__(self, sock=None, map=None):
-        asyncore.dispatcher_with_send.__init__(self, sock, map)
-        self.in_buf = ""
+        asyncore.dispatcher.__init__(self, sock, map)
+        self.out_buf = []
+        self.in_buf = ''
         self.in_size = 0
         self.in_handler = None
 
+    def writable(self):
+        return (not self.connected) or len(self.out_buf)
+
     def readable(self):
-        return self.in_handler and len(self.in_buf) < self.in_size and asyncore.dispatcher_with_send.readable(self)
+        return (not self.connected) or self.in_handler
+
+    def send(self, data):
+        self.out_buf.append(data)
+        self.handle_write()
+
+    def handle_write(self):
+        while self.out_buf:
+            buf = self.out_buf[0]
+            r = asyncore.dispatcher.send(self, buf)
+            if r < len(buf):
+                if r: self.out_buf[0] = buf[r:]
+                return
+            self.out_buf.pop(0)
 
     def next_read(self, size, f):
         self.in_size = size
@@ -36,9 +53,11 @@ class KVSDispatcher(asyncore.dispatcher_with_send):
 
     def handle_read(self):
         z = self.in_size
-        b = self.recv(z - len(self.in_buf))
-        self.in_buf += b
-        if len(self.in_buf) >= z:
+        n = len(self.in_buf)
+        if n < z:
+             self.in_buf += self.recv(z - n)
+             n = len(self.in_buf)
+        if n >= z:
             i = self.in_buf[:z]
             handler = self.in_handler
             self.in_buf = self.in_buf[z:]
