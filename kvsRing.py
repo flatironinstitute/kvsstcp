@@ -1,9 +1,10 @@
 #!/usr/bin/python
 from __future__ import print_function
 
-import kvsstcp, os, time, sys
+import os, time, sys
+from kvsclient import KVSClient
 
-kvs = kvsstcp.KVSClient(os.getenv('KVSSTCP_HOST'), os.getenv('KVSSTCP_PORT'))
+kvs = KVSClient(os.getenv('KVSSTCP_HOST'), os.getenv('KVSSTCP_PORT'))
 rank, pop = int(os.getenv('SLURM_PROCID')), int(os.getenv('SLURM_NTASKS'))
 
 myTag = 'data%10d'%rank

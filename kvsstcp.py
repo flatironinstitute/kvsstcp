@@ -1,98 +1,138 @@
 #!/usr/bin/env python
+import asyncore
 from collections import defaultdict as DD
 from cPickle import dumps as PDS
+from functools import partial
 import gc
 import logging
 import os
 import resource
 import socket
-import SocketServer
 import sys
-from threading import current_thread, Lock, Semaphore as Sem, Thread
+from threading import Thread
 
 from kvscommon import *
 
 logger = logging.getLogger('Key value store')
 #logger.config.dictConfig({'format': '%(asctime)s - %(levelname)s: %(message)s', 'filename': 'toodle', 'level': logging.DEBUG3})
 
-gc.disable()
-# This never gets reenabled, though python does use perl-style reference counting, so this only impacts cyclic data structures
+# There are some cyclic references in in asyncio, handlers, waiters, etc., so I'm re-enabling this:
+#gc.disable()
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
-    # Don't let a balky client thread prevent a server exit.
-    daemon_threads = True
+# Adds buffered input of known-size blocks
+class KVSDispatcher(asyncore.dispatcher_with_send):
+    def __init__(self, sock=None, map=None):
+        asyncore.dispatcher_with_send.__init__(self, sock, map)
+        self.in_buf = ""
+        self.in_size = 0
+        self.in_handler = None
 
-class KVSRequestHandler(SocketServer.BaseRequestHandler):
-    # Called per connection. Keep the connection open until we get a
-    # "'clos'e" op. TODO: Make this configurable.
-    def handle(self):
-        kvs, req, whoAmI = self.server.kvs, self.request, repr(current_thread())
-        req.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        reqtxt = repr(req.getpeername())
-        logger.info('Accepted connect from %s, using thread %s'%(reqtxt, whoAmI))
-        # Keep a master list of client connections to be used when it is time to shutdown.
-        with self.server.clientLock: self.server.clients.append(req)
-        while 1:
-            try:
-                op = recvall(req, 4)
-            except Exception, e: 
-                # An error at this point most likely means a client
-                # exited without sending close. No big deal.
-                logger.info('(%s) handler exiting with "%s".'%(whoAmI, str(e)))
-                break
-            #DEBUGOFF            logger.debug('(%s) %s op "%s"'%(whoAmI, reqtxt, op))
-            if 'clos' == op:
-                req.shutdown(socket.SHUT_RDWR)
-                req.close()
-                break
-            elif 'down' == op:
-                with self.server.clientLock:
-                    # This clientlock doesn't completely seem necessary (list.append is thread-safe), and in particular doesn't ensure that all clients are shutdown
-                    # It might be better to shutdown the server first, and then handle closing clients once serve_forever returns, using while clients.pop: shutdown_request
-                    for c in self.server.clients:
-                        logger.info('Shutdown closing: %s (%s)', repr(c), repr(c.getpeername()))
-                        try: c.shutdown(socket.SHUT_RDWR)
-                        except Exception, e: logger.info('Ignoring socket.shutdown exception during shutdown: "%s".', e)
-                        try: c.close()
-                        except Exception, e: logger.info('Ignoring socket.close exception during shutdown: "%s".', e)
-                
-                logger.info('Calling server shutdown')
-                self.server.shutdown()
-                break
-            elif 'dump' == op:
-                d = kvs.dump()
-                req.sendall(AsciiLenFormat%(len(d)))
-                req.sendall(d)
-                continue
+    def readable(self):
+        return self.in_handler and len(self.in_buf) < self.in_size and asyncore.dispatcher_with_send.readable(self)
 
-            key = recvall(req, int(recvall(req, AsciiLenChars)))
-            #DEBUGOFF            logger.debug('(%s) %s key "%s"'%(whoAmI, reqtxt, key))
-            if 'get_' == op:
-                (encoding, val) = kvs.get(key)
-                # If the client closes the connection (cleanly or otherwise)
-                # while we're waiting in the above get, we don't find out until
-                # the get completes.  Ideally we'd notice the close and cancel
-                # the get.  (This would still leave a race condition where the
-                # value is lost if the client closes after the get completes
-                # but before the send.)
-                req.sendall(encoding)
-                req.sendall(AsciiLenFormat%(len(val)))
-                req.sendall(val)
-            elif 'mkey' == op:
-                val = recvall(req, int(recvall(req, AsciiLenChars)))
-                #DEBUGOFF                logger.debug('(%s) val: %s'%(whoAmI, repr(val)))
-                kvs.monkey(key, val)
-            elif 'put_' == op:
-                encoding = recvall(req, 4)
-                val = recvallba(req, int(recvall(req, AsciiLenChars)))
-                #DEBUGOFF                logger.debug('(%s) val: %s'%(whoAmI, repr(val)))
-                kvs.put(key, (encoding, val))
-            elif 'view' == op:
-                (encoding, val) = kvs.view(key)
-                req.sendall(encoding)
-                req.sendall(AsciiLenFormat%(len(val)))
-                req.sendall(val)
-        logger.info('Closing connection from %s, thread %s'%(reqtxt, whoAmI))
+    def next_read(self, size, f):
+        self.in_size = size
+        self.in_handler = f
+
+    def handle_read(self):
+        z = self.in_size
+        b = self.recv(z - len(self.in_buf))
+        self.in_buf += b
+        if len(self.in_buf) >= z:
+            i = self.in_buf[:z]
+            handler = self.in_handler
+            self.in_buf = self.in_buf[z:]
+            self.in_handler = None
+            handler(i)
+
+class KVSRequestHandler(KVSDispatcher):
+    def __init__(self, pair, server):
+        sock, addr = pair
+        self.server = server
+        # Keep track of any currently waiting get:
+        self.waiter = None
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        KVSDispatcher.__init__(self, sock)
+        logger.info('Accepted connect from %s', repr(addr))
+        self.next_op()
+
+    def handle_close(self):
+        self.cancel_waiter()
+        logger.info('Closing connection from %s', repr(self.addr))
+        self.close()
+
+    def cancel_waiter(self):
+        if self.waiter:
+            self.server.kvs.cancel_wait(self.waiter)
+            self.waiter = None
+
+    def next_op(self):
+        self.next_read(4, self.handle_op)
+
+    def next_lendata(self, handler):
+        # wait for variable-length data prefixed by AsciiLenFormat
+        def handle_len(l):
+            n = int(l)
+            if n <= 0: raise Exception("invalid data len: '%s'" % l)
+            self.next_read(n, handler)
+        self.next_read(AsciiLenChars, handle_len)
+
+    def handle_op(self, op):
+        if 'clos' == op:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        elif 'down' == op:
+            logger.info('Calling server shutdown')
+            self.server.shutdown()
+        elif 'dump' == op:
+            d = self.server.kvs.dump()
+            self.send(AsciiLenFormat%(len(d)))
+            self.send(d)
+            self.next_op()
+        elif op in ['get_', 'mkey', 'put_', 'view']:
+            self.next_lendata(partial(self.handle_opkey, op))
+        else:
+            raise Exception("Unknown op from %s: '%s'", repr(self.addr), op)
+
+    def handle_opkey(self, op, key):
+        #DEBUGOFF            logger.debug('(%s) %s key "%s"', whoAmI, reqtxt, key)
+        if 'mkey' == op:
+            self.next_lendata(partial(self.handle_mkey, key))
+        elif 'put_' == op:
+            self.next_read(4, lambda encoding:
+                self.next_lendata(partial(self.handle_put, key, encoding)))
+        else: # 'get_' or 'view'
+            # Cancel waiting for any previous get/view operation (since client wouldn't be able to distinguish the async response)
+            self.cancel_waiter()
+            self.waiter = KVSWaiter(op, key, self.handle_got)
+            self.server.kvs.wait(self.waiter)
+            # But keep listening for another op (like 'clos') to cancel this one
+            self.next_op()
+
+    def handle_mkey(self, key, val):
+        #DEBUGOFF                logger.debug('(%s) val: %s', whoAmI, repr(val))
+        self.server.kvs.monkey(key, val)
+        self.next_op()
+
+    def handle_put(self, key, encoding, val):
+        # TODO: bytearray val?
+        #DEBUGOFF                logger.debug('(%s) val: %s', whoAmI, repr(val))
+        self.server.kvs.put(key, (encoding, val))
+        self.next_op()
+
+    def handle_got(self, encval):
+        (encoding, val) = encval
+        self.send(encoding)
+        self.send(AsciiLenFormat%(len(val)))
+        self.send(val)
+        self.waiter = None
+
+class KVSWaiter:
+    def __init__(self, op, key, handler):
+        if op == 'get_': op = 'get'
+        self.op = op
+        self.delete = op == 'get'
+        self.key = key
+        self.handler = handler
 
 class KVS(object):
     '''Get/Put/View implements a client-server key value store. If no
@@ -107,9 +147,9 @@ class KVS(object):
  
     def __init__(self, getIndex=0, viewIndex=-1):
         self.getIndex, self.viewIndex = getIndex, viewIndex #TODO: Add sanity checks?
-        self.lock = Lock()                # Serializes access to the key/value dictionary.
         self.key2mon = DD(lambda:DD(set)) # Maps a normal key to keys that monitor it.
         self.monkeys = set()              # List of monitor keys.
+        # store and waiters are mutually exclusive, and could be kept in the same place
         self.store = DD(list)
         self.waiters = DD(list)
         self.opCounts = {'get': 0, 'put': 0, 'view': 0, 'wait': 0}
@@ -130,42 +170,35 @@ class KVS(object):
             if len(v[1]) > 50: return (v[0], len(v[1]), v[1][:24] + '...' + v[1][-23:])
             return v
 
-        with self.lock:
-            return PDS(([self.opCounts['get'], self.opCounts['put'], self.opCounts['view'], self.opCounts['wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.iteritems()], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.iteritems()]))
+        return PDS(([self.opCounts['get'], self.opCounts['put'], self.opCounts['view'], self.opCounts['wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.iteritems() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.iteritems() if vv]))
 
-    def get(self, k):
-        '''Atomically remove and return a value associated with key k. If
-        none, block.
-
-        '''
-        return self._gv(k, 'get')
-
-    def _gv(self, k, op):
-        #DEBUGOFF        logger.debug('_gv: %s, %s'%(repr(k), repr(op)))
-        self._doMonkeys(op, k)
-        delete = op == 'get'
-        while 1:
-            self.lock.acquire()
-            vv = self.store.get(k)
-            if vv:
-                if delete:
-                    v = vv.pop(self.getIndex)
-                    if not vv: self.store.pop(k)
-                else:
-                    v = vv[self.viewIndex]
-                self.opCounts[op] += 1
-                self.lock.release()
-                #DEBUGOFF                logger.debug('_gv (%s): %s => %s (%d)'%(op, k, repr(v[0]), len(v[1])))
-                return v
+    def wait(self, waiter):
+        '''Atomically (remove and) return a value associated with key k. If
+        none, block.'''
+        #DEBUGOFF        logger.debug('wait: %s, %s', repr(waiter.key), repr(waiter.op))
+        self._doMonkeys(waiter.op, waiter.key)
+        vv = self.store.get(waiter.key)
+        if vv:
+            if waiter.delete:
+                v = vv.pop(self.getIndex)
+                if not vv: self.store.pop(waiter.key)
             else:
-                s = Sem(0)
-                self.waiters[k].append((s, delete))
-                self.opCounts['wait'] += 1
-                self.lock.release()
-                self._doMonkeys('wait', k)
-                #DEBUGOFF                logger.debug('(%s) %s acquiring'%(repr(current_thread()), repr(s)))
-                self.ac += 1
-                s.acquire()
+                v = vv[self.viewIndex]
+            self.opCounts[waiter.op] += 1
+            #DEBUGOFF                logger.debug('_gv (%s): %s => %s (%d)', waiter.op, waiter.key, repr(v[0]), len(v[1]))
+            waiter.handler(v)
+        else:
+            self.waiters[waiter.key].append(waiter)
+            self.opCounts['wait'] += 1
+            self._doMonkeys('wait', waiter.key)
+            #DEBUGOFF                logger.debug('(%s) %s acquiring', repr(waiter), repr(s))
+            self.ac += 1
+
+    def cancel_wait(self, waiter):
+        ww = self.waiters.get(waiter.key)
+        if ww:
+            ww.remove(waiter)
+            if not ww: self.waiters.pop(waiter.key)
 
     def monkey(self, mkey, v):
         '''Make Mkey a monitor key. Value encodes what events to monitor and
@@ -183,68 +216,80 @@ class KVS(object):
         '''
         #DEBUGOFF        logger.debug('monkey: %s %s', mkey, v)
         if ':' not in v: return #TODO: Add some sort of error handling?
-        with self.lock:
-            self.monkeys.add(mkey)
-            k, events = v.split(':')
-            if not k: k = True
-            for e, op  in [('g', 'get'), ('p', 'put'), ('v', 'view'), ('w', 'wait')]:
-                if e in events:
-                    self.key2mon[k][op].add(mkey)
-                else:
-                    try: self.key2mon[k][op].remove(mkey)
-                    except KeyError: pass
+        self.monkeys.add(mkey)
+        k, events = v.split(':')
+        if not k: k = True
+        for e, op  in [('g', 'get'), ('p', 'put'), ('v', 'view'), ('w', 'wait')]:
+            if e in events:
+                self.key2mon[k][op].add(mkey)
+            else:
+                try: self.key2mon[k][op].remove(mkey)
+                except KeyError: pass
         #DEBUGOFF        logger.debug('monkey: %s', repr(self.key2mon))
 
     def put(self, k, v):
         '''Add value v to those associated with the key k.'''
-        #DEBUGOFF        logger.debug('put: %s, %s'%(repr(k), repr(v)))
-        with self.lock:
-            self.opCounts['put'] += 1
-            self.store[k].append(v)
-            ww = self.waiters.get(k) # No waiters is probably most common, so optimize for
-                                     # that. ww will be None if no waiters have been
-                                     # registered for key k.
-            if ww:
-                while ww:
-                    s, delete = ww.pop(0)
-                    #DEBUGOFF                    logger.debug('%s releasing'%repr(s))
-                    self.rc += 1
-                    s.release()
-                    if delete: break 
-                if not ww: self.waiters.pop(k)
+        #DEBUGOFF        logger.debug('put: %s, %s', repr(k), repr(v))
+        self.opCounts['put'] += 1
+        ww = self.waiters.get(k) # No waiters is probably most common, so optimize for
+                                 # that. ww will be None if no waiters have been
+                                 # registered for key k.
+        consumed = False
+        if ww:
+            while ww:
+                waiter = ww.pop(0)
+                #DEBUGOFF                    logger.debug('%s releasing', repr(waiter))
+                self.rc += 1
+                self.opCounts[waiter.op] += 1
+                waiter.handler(v)
+                if waiter.delete:
+                    consumed = True
+                    break
+            if not ww: self.waiters.pop(k)
+
+        if not consumed: self.store[k].append(v)
         self._doMonkeys('put', k)
 
-    def view(self, k):
-        '''Return a value associated with key k. If none, block.'''
-        return self._gv(k, 'view')
-
-class KVSServerThreadException(Exception): pass
-
-class KVSServerThread(Thread):
-    def __init__(self, host=None, port=0, name='KVSServerThread'):
-        Thread.__init__(self, name=name)
-
+class KVSServer(Thread, asyncore.dispatcher):
+    def __init__(self, host, port):
         if not host: host = socket.gethostname()
-        self.server = ThreadedTCPServer((host, port), KVSRequestHandler)
-        self.cinfo = (host, self.server.server_address[1])
 
-        logger.info('Setting queue size to 4000')
-        self.server.request_queue_size = 4000
+        Thread.__init__(self, name='KVSServerThread')
+        asyncore.dispatcher.__init__(self)
+        self.kvs = KVS()
 
         snof, hnof = resource.getrlimit(resource.RLIMIT_NOFILE)
         wantnof = min(hnof, 4096)
         if snof < wantnof:
-            logger.info('Raising queue size from %d to %d'%(snof, wantnof))
+            logger.info('Raising queue size from %d to %d', snof, wantnof)
             resource.setrlimit(resource.RLIMIT_NOFILE, (wantnof, hnof))
 
-        self.server.clientLock = Lock()
-        self.server.clients = []
-        self.server.kvs = KVS()
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.set_reuse_addr()
+        self.bind((host, port))
+        logger.info('Setting queue size to 4000')
+        self.listen(4000)
+        self.cinfo = self.socket.getsockname()
+
+        self.running = True
         self.start()
 
+    def handle_accept(self):
+        pair = self.accept()
+        if pair is not None:
+            KVSRequestHandler(pair, self)
+
+    def handle_close(self):
+        logger.info('Server shutting down')
+        self.running = False
+        asyncore.close_all(ignore_all = True)
+
+    def shutdown(self):
+        if self.running:
+            self.socket.shutdown(socket.SHUT_RDWR)
+
     def run(self):
-        self.server.serve_forever()
-        self.server.server_close()
+        asyncore.loop(None, True)
 
 if '__main__' == __name__:
     import argparse
@@ -263,9 +308,9 @@ if '__main__' == __name__:
         lconf['filename'] = args.logfile.name
     logging.basicConfig(**lconf)
 
-    t = KVSServerThread(args.host, args.port)
+    t = KVSServer(args.host, args.port)
     addr = '%s:%d'%t.cinfo
-    logger.info('Server running at %s.'%addr)
+    logger.info('Server running at %s.', addr)
     if args.addrfile:
         args.addrfile.write(addr)
         args.addrfile.close()
@@ -281,5 +326,5 @@ if '__main__' == __name__:
             while t.isAlive():
                 t.join(60)
     finally:
-        t.server.shutdown();
+        t.shutdown()
     t.join()

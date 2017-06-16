@@ -1,5 +1,5 @@
 import os, sys
-from kvsstcp import KVSClient
+from kvsclient import KVSClient
 
 # Connect to the key value store service (its location is the first
 # argument).

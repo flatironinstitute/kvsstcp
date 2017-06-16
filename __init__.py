@@ -1,2 +1,2 @@
 from .kvsclient import KVSClient
-from .kvsstcp import KVSServerThread
+from .kvsstcp import KVSServer as KVSServerThread
