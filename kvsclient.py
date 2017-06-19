@@ -136,7 +136,7 @@ class KVSClient(object):
     def shutdown(self):
         '''Tell the KVS server to shutdown (and run the close() method for this client).'''
         try:
-            self._retry(self.shutdown)
+            self._retry(self._shutdown)
         finally:
             self.close()
 
