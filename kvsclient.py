@@ -50,11 +50,12 @@ class KVSClient(object):
             except socket.error, msg:
                 if retry >= self.retry: raise
                 print >>sys.stderr, 'kvs socket error: %s, retrying' % msg
-            try:
-                self.socket.close()
-            except socket.error:
-                pass
-            self.socket = None
+            if self.socket:
+                try:
+                    self.socket.close()
+                except socket.error:
+                    pass
+                self.socket = None
             # exponential backoff
             time.sleep(2 ** retry)
             retry += 1

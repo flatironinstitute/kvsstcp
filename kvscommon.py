@@ -1,3 +1,5 @@
+import socket
+
 # The line protocol is very simple:
 #
 #  4 byte operation ('clos', 'dump', 'get_', 'mkey', 'put_', 'view')
@@ -41,19 +43,7 @@ def recvall(s, n):
     d = ''
     while n:
         b = s.recv(n)
-        if not b: raise Exception('Connection dropped.')
+        if not b: raise socket.error('Connection dropped')
         d += b
         n -= len(b)
     return d
-
-def recvallba(s, n):
-    '''Wrapper to deal with partial recvs when we know there are N bytes to be had. Returns a byte array.'''
-    d = bytearray(n)
-    v = memoryview(d)
-    while n:
-        b = s.recv_into(v, n)
-        if not b: raise Exception('Connection dropped.')
-        v = v[b:]
-        n -= b
-    return d
-
