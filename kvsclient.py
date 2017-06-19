@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import os
 import socket
 import sys
@@ -145,3 +146,50 @@ class KVSClient(object):
 
     def view(self, k, usePickle=True):
         return self._retry(self._view, k, usePickle)
+
+def addKVSServerArgument(argp, name = 'kvsserver'):
+    '''Add an argument to the given ArgumentParser that accepts the address of a running KVSServer, defaulting to $KVSSTCP_HOST:$KVSSTCP_PORT.'''
+    host = os.environ.get('KVSSTCP_HOST')
+    port = os.environ.get('KVSSTCP_PORT') if host else None
+    argp.add_argument(name, metavar='host:port', nargs='?' if port else None, default=host+':'+port if port else None, help='KVS server address.')
+
+if '__main__' == __name__:
+    import argparse
+
+    class OpAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            items = getattr(namespace, 'ops', [])
+            op = self.option_strings[1][2:]
+            if op in ['get', 'view', 'put']:
+                pickle = getattr(namespace, 'pickle', False)
+                values.append(pickle)
+                if pickle and op == 'put':
+                    values[1] = eval(values[1], {})
+            values.insert(0, op)
+            items.append(values)
+            setattr(namespace, 'ops', items)
+
+    argp = argparse.ArgumentParser(description='Command-line client to key-value storage server.')
+    argp.add_argument('-r', '--retry', default=0, type=int, help='Number of times to retry on failure')
+    argp.add_argument('-P', '--pickle', action='store_true', help='(Un-)Pickle values')
+    argp.add_argument('-R', '--no-pickle', dest='pickle', action='store_false', help="Don't (un-)pickle values")
+    argp.add_argument('-d', '--dump', action=OpAction, nargs=0, help='Dump the current state')
+    argp.add_argument('-g', '--get', action=OpAction, nargs=1, metavar='KEY', help='Retrieve and remove a value')
+    argp.add_argument('-v', '--view', action=OpAction, nargs=1, metavar='KEY', help='Retrieve a value')
+    argp.add_argument('-p', '--put', action=OpAction, nargs=2, metavar=('KEY','VALUE'), help='Put a value (if pickling, evaluate as a python expression)')
+    argp.add_argument('-m', '--monkey', action=OpAction, nargs=2, metavar=('MKEY','KEY:EVENTS'), help='Create a monitor key in the KVS')
+    argp.add_argument('-S', '--shutdown', action=OpAction, nargs=0, help='Tell the KVS to shutdown')
+    argp.add_argument('-s', '--sleep', action=OpAction, nargs=1, metavar='SECS', help='Pause for a time')
+    addKVSServerArgument(argp, 'server')
+    args = argp.parse_args()
+
+    kvs = KVSClient(args.server, retry = args.retry)
+
+    for cmd in args.ops:
+        op = cmd.pop(0)
+        if op == 'sleep':
+            time.sleep(float(*cmd))
+        else:
+            r = getattr(kvs, op)(*cmd)
+            if r is not None:
+                print(r)

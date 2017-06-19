@@ -3,7 +3,7 @@ import argparse, base64, hashlib, json, os, SimpleHTTPServer, socket, SocketServ
 from threading import current_thread, Lock, Thread
 import pkg_resources
 
-import kvsclient as kvsstcp
+import kvsclient
 
 # The web monitor implements two conventions wrt keys:
 #
@@ -54,7 +54,7 @@ class KVSWaitThread(Thread):
         self.daemon = True
         self.mk = mk
         self.wslist = wslist
-        self.kvsc = kvsstcp.KVSClient(kvsaddr)
+        self.kvsc = kvsclient.KVSClient(kvsaddr)
         self.kvsc.monkey(mk, spec)
         self.frontend = frontend
         self.start()
@@ -76,7 +76,7 @@ class WebSocketServer(object):
         self.lock = Lock()
         self.active = True
 
-        kvsc = kvsstcp.KVSClient(kvsaddr)
+        kvsc = kvsclient.KVSClient(kvsaddr)
         wslist.add(self)
 
         try:
@@ -245,9 +245,7 @@ if '__main__' == __name__:
     argp.add_argument('-u', '--urlfile', default=None, type=argparse.FileType('w'), help='Write url to this file.')
     argp.add_argument('-b', '--bind', default=socket.gethostname(), type=str, help='HTTP IP to listen on (hostname).')
     argp.add_argument('-p', '--port', default=0, type=int, help='HTTP port to listen on (random).')
-    kvshost = os.environ.has_key('KVSSTCP_HOST')
-    kvsport = os.environ.has_key('KVSSTCP_PORT')
-    argp.add_argument('kvsserver', metavar='host:port', nargs='?' if kvshost and kvsport else None, help='KVS server address.')
+    kvsclient.addKVSServerArgument(argp)
     args = argp.parse_args()
 
     args.addr = (args.bind, args.port)
