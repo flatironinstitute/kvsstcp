@@ -90,9 +90,8 @@ class KVSClient(object):
     def _gv(self, k, op, usePickle):
         self.socket.sendall(op)
         self._sendLenAndBytes(k)
-        # Ignore encoding for the time being.
-        recvall(self.socket, 4)
-        return self._recvValue(usePickle)
+        coding = recvall(self.socket, 4)
+        return self._recvValue(usePickle and coding == 'PYPK')
 
     def _monkey(self, k, v):
         self.socket.sendall('mkey')
