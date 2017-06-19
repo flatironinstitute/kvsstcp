@@ -4,6 +4,7 @@ from threading import current_thread, Lock, Thread
 import pkg_resources
 
 import kvsclient
+from kvscommon import recvall
 
 # The web monitor implements two conventions wrt keys:
 #
@@ -38,15 +39,6 @@ def dump2json(kvsc):
     r = json.dumps(kvsc.dump(), ensure_ascii = False, check_circular = False, encoding = 'latin-1', default = jsonDefault)
     if isinstance(r, unicode): r = r.encode('latin-1')
     return r
-
-def recvall(s, n):
-    d = ''
-    while n:
-        b = s.recv(n)
-        if not b: raise Exception('Connection dropped.')
-        d += b
-        n -= len(b)
-    return d
 
 class KVSWaitThread(Thread):
     def __init__(self, kvsaddr, wslist, mk, spec, frontend, name='KVSClientThread'):
