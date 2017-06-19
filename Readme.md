@@ -5,7 +5,11 @@ Inspired by networkspaces, which was in turn inspired by the Linda coordination 
 
 Similar systems exist, the point of this one is to provide a simple to deploy and reasonably functional and efficient store that is easy to integrate with many different programming environments.
 
-"kvsstcp.py" contains the server and python client. See a comments throughout this file for a description of the line protocol and client methods. It should work with any stock python 2.7 or above.
+The reference python implementation should work with any stock python 2.7 or above:
+
+   * `kvscommon.py` contains the line protocol description and common utilities,
+   * `kvsstcp.py` contains the server, which can be run from the command line or from within another python module as `KVSServer()` to start the server thread
+   * `kvsclient.py` contains the client interface, which can be run from the command line or from within another python module as `KVSClient(host, port)`
 
 "kvsSupport.[ch]" contains a client that can be linked with C or FORTRAN codes.
 
@@ -19,6 +23,6 @@ Similar systems exist, the point of this one is to provide a simple to deploy an
 
 	sbatch -N 2 --ntasks-per-node=28 --exclusive kvsBatchWrapper.sh ./kvsTestf
 
-"wskvsmu.py" is a prototype web interface for displaying the state of a KVS server (and injecting values into it). Uses "varFormTemplate.html" and "wskvspage.html" as templates.
+`wskvsmu.py` is a prototype web interface for displaying the state of a KVS server (and injecting values into it). Uses `wskvspage.html` as the frontend.
 
 "kvsTestWIc.c" and "kvsTestWIf.f" provide example codes that use KVS via wskvsmu.py to enter input from a web browser into C or FORTRAN. 
