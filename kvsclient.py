@@ -32,11 +32,7 @@ class KVSClient(object):
         self.waiting = None
         self.connect()
 
-    def _check_wait(self, wait=None):
-        if self.waiting and self.waiting != wait:
-            # We could implement an explicit "cancel wait" call with a response to let this be canceled explicitly
-            raise Exception("Previous %s timed out: you must retreive the previously requested %s value first." % self.waiting)
-
+    # Low-level network operations
     def _connect(self):
         if self.socket: return
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -47,25 +43,6 @@ class KVSClient(object):
             self.socket = None
             raise
 
-    def _retry(self, act, *args):
-        retry = 0
-        while 1:
-            try:
-                self._connect()
-                return act(*args)
-            except socket.error, msg:
-                if retry >= self.retry: raise
-                print >>sys.stderr, 'kvs socket error: %s, retrying' % msg
-            self._close()
-            # exponential backoff
-            time.sleep(2 ** retry)
-            retry += 1
-
-    def connect(self):
-        '''Reconnect, if necessary.  Can be used after an explicit close.'''
-        # _retry calls _connect
-        self._retry(lambda: None)
-
     def _close(self):
         if not self.socket: return
         try:
@@ -75,41 +52,21 @@ class KVSClient(object):
         self.socket = None
         self.waiting = None
 
-    def close(self):
-        '''Close the connection to the KVS storage server. Does a socket shutdown as well.'''
-        self._check_wait()
-        if not self.socket: return
-        try:
-            self.socket.sendall('clos')
-            self.socket.shutdown(socket.SHUT_RDWR)
-        except socket.error, e:
-            # this is the client --- cannot assume logging is available.
-            print >>sys.stderr, 'Ignoring exception during client close: "%s"'%e
-        self._close()
+    def _recvValue(self, doPickle=False):
+        l = int(recvall(self.socket, AsciiLenChars))
+        payload = recvall(self.socket, l)
+        if doPickle: payload = PLS(payload)
+        return payload
+
+    def _sendLenAndBytes(self, payload, doPickle=False):
+        if doPickle: payload = PDS(payload)
+        # if not doPickle, this seems very likely to be wrong for anything but bytearrays (encoding, etc.)
+        self.socket.sendall(AsciiLenFormat%len(payload))
+        self.socket.sendall(payload)
 
     def _dump(self):
         self.socket.sendall('dump')
         return self._recvValue(True)
-
-    def dump(self):
-        self._check_wait()
-        return self._retry(self._dump)
-
-    def get(self, k, usePickle=True, timeout=None):
-        '''Retrieve and remove a value from the store.
-        
-        If usePickle is True, and the value was pickled, then the value will be
-        unpickled before being returned.  If timeout is not None, this will
-        only wait for timeout seconds before throwing a socket.timeout error.
-        In this case, you MUST call this function again in the future until it
-        returns a value before doing any other operation, otherwise the value
-        may be lost.
-        '''
-        return self._rgv('get_', k, usePickle, timeout)
-
-    def _rgv(self, op, k, usePickle, timeout):
-        self._check_wait((op, k))
-        return self._retry(self._gv, op, k, usePickle, timeout)
 
     def _gv(self, op, k, usePickle, timeout):
         if not self.waiting:
@@ -131,10 +88,6 @@ class KVSClient(object):
         self._sendLenAndBytes(k)
         self._sendLenAndBytes(v)
 
-    def monkey(self, k, v):
-        self._check_wait()
-        return self._retry(self._monkey, k, v)
-
     def _put(self, k, v, usePickle=True):
         if usePickle:
             coding = 'PYPK'
@@ -149,24 +102,95 @@ class KVSClient(object):
         self.socket.sendall(coding)
         self._sendLenAndBytes(v, usePickle)
 
-    def put(self, k, v, usePickle=True):
-        self._check_wait()
-        return self._retry(self._put, k, v, usePickle)
-
-    def _recvValue(self, doPickle=False):
-        l = int(recvall(self.socket, AsciiLenChars))
-        payload = recvall(self.socket, l)
-        if doPickle: payload = PLS(payload)
-        return payload
-
-    def _sendLenAndBytes(self, payload, doPickle=False):
-        if doPickle: payload = PDS(payload)
-        # if not doPickle, this seems very likely to be wrong for anything but bytearrays (encoding, etc.)
-        self.socket.sendall(AsciiLenFormat%len(payload))
-        self.socket.sendall(payload)
-
     def _shutdown(self):
         self.socket.sendall('down')
+
+    def _retry(self, act, *args):
+        '''Retry the given operation if it fails, reconnecting each time.'''
+        retry = 0
+        while 1:
+            try:
+                self._connect()
+                return act(*args)
+            except socket.error, msg:
+                if retry >= self.retry: raise
+                print >>sys.stderr, 'kvs socket error: %s, retrying' % msg
+            self._close()
+            # exponential backoff
+            time.sleep(2 ** retry)
+            retry += 1
+
+    def _check_wait(self, wait=None):
+        '''Make sure there's no outstanding get/view call that must be retried,
+        or at least that it matches the current operation.'''
+        if self.waiting and self.waiting != wait:
+            # We could implement an explicit "cancel wait" call with a response to let this be canceled explicitly
+            raise Exception("Previous %s timed out: you must retreive the previously requested %s value first." % self.waiting)
+
+    def _retry_gv(self, op, k, usePickle, timeout):
+        self._check_wait((op, k))
+        return self._retry(self._gv, op, k, usePickle, timeout)
+
+    def connect(self):
+        '''Reconnect, if necessary.  Can be used after an explicit close.'''
+        # _retry calls _connect
+        self._retry(lambda: None)
+
+    def close(self):
+        '''Close the connection to the KVS storage server. Does a socket shutdown as well.'''
+        self._check_wait()
+        if not self.socket: return
+        try:
+            self.socket.sendall('clos')
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except socket.error, e:
+            # this is the client --- cannot assume logging is available.
+            print >>sys.stderr, 'Ignoring exception during client close: "%s"'%e
+        self._close()
+
+    def dump(self):
+        '''Returns a snapshot of the KV store and its statistics.'''
+        self._check_wait()
+        return self._retry(self._dump)
+
+    def get(self, k, usePickle=True, timeout=None):
+        '''Retrieve and remove a value from the store.  If there is no value
+        associated with this key, block until one is added by another client
+        (with put).
+        
+        If usePickle is True, and the value was pickled, then the value will be
+        unpickled before being returned.  If timeout is not None, this will
+        only wait for timeout seconds before throwing a socket.timeout error.
+        In this case, you MUST call this function again in the future until it
+        returns a value before doing any other operation, otherwise the value
+        may be lost.
+        '''
+        return self._retry_gv('get_', k, usePickle, timeout)
+
+    def view(self, key, usePickle=True, timeout=None):
+        '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
+        return self._rgv('view', key, usePickle, timeout)
+
+    def put(self, key, value, usePickle=True):
+        '''Add a value to the key, pickling it if usePickle.'''
+        self._check_wait()
+        return self._retry(self._put, key, value, usePickle)
+
+    def monkey(self, mkey, value):
+        '''Make mkey a monitor key. Value encodes what events to monitor and
+        for which key:
+
+                Key:Events
+
+        Whenever a listed event occurs for "Key", a put will be done
+        to "Mkey" with the value "<event> <key>".  If 'Key' is empty,
+        the events listed will be monitored for all keys.  'Events' is
+        some subset of 'g', 'p', 'v' and 'w' (get, put, view and
+        wait). Monitoring of any event *not* listed is turned off for
+        the specified key.
+        '''
+        self._check_wait()
+        return self._retry(self._monkey, mkey, value)
 
     def shutdown(self):
         '''Tell the KVS server to shutdown (and run the close() method for this client).'''
@@ -174,10 +198,6 @@ class KVSClient(object):
             self._retry(self._shutdown)
         finally:
             self.close()
-
-    def view(self, k, usePickle=True, timeout=None):
-        '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
-        return self._rgv('view', k, usePickle, timeout)
 
 def addKVSServerArgument(argp, name = 'kvsserver'):
     '''Add an argument to the given ArgumentParser that accepts the address of a running KVSServer, defaulting to $KVSSTCP_HOST:$KVSSTCP_PORT.'''
