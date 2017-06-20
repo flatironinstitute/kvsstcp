@@ -168,7 +168,7 @@ if '__main__' == __name__:
                     values[1] = eval(values[1], {})
             values.insert(0, op)
             items.append(values)
-            setattr(namespace, 'ops', items)
+            namespace.ops = items
 
     argp = argparse.ArgumentParser(description='Command-line client to key-value storage server.')
     argp.add_argument('-r', '--retry', default=0, type=int, help='Number of times to retry on failure')
