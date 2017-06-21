@@ -154,7 +154,7 @@ class KVSClient(object):
         self._check_wait()
         return self._retry(self._dump)
 
-    def get(self, k, usePickle=True, timeout=None):
+    def get(self, key, usePickle=True, timeout=None):
         '''Retrieve and remove a value from the store.  If there is no value
         associated with this key, block until one is added by another client
         (with put).
@@ -166,11 +166,11 @@ class KVSClient(object):
         returns a value before doing any other operation, otherwise the value
         may be lost.
         '''
-        return self._retry_gv('get_', k, usePickle, timeout)
+        return self._retry_gv('get_', key, usePickle, timeout)
 
     def view(self, key, usePickle=True, timeout=None):
         '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
-        return self._rgv('view', key, usePickle, timeout)
+        return self._retry_gv('view', key, usePickle, timeout)
 
     def put(self, key, value, usePickle=True):
         '''Add a value to the key, pickling it if usePickle.'''
