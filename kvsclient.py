@@ -80,6 +80,7 @@ class KVSClient(object):
             self.socket.settimeout(None)
         if not c:
             raise socket.error("Connection closed")
+        self.waiting = None
         coding = c + recvall(self.socket, 3)
         return self._recvValue(usePickle and coding == 'PYPK')
 
