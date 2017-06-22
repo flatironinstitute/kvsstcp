@@ -59,8 +59,7 @@ class KVSClient(object):
         if doPickle: payload = PLS(payload)
         return payload
 
-    def _sendLenAndBytes(self, payload, doPickle=False):
-        if doPickle: payload = PDS(payload)
+    def _sendLenAndBytes(self, payload):
         # if not doPickle, this seems very likely to be wrong for anything but bytearrays (encoding, etc.)
         self.socket.sendall(AsciiLenFormat%len(payload))
         self.socket.sendall(payload)
@@ -69,7 +68,7 @@ class KVSClient(object):
         self.socket.sendall('dump')
         return self._recvValue(True)
 
-    def _gv(self, op, k, usePickle, timeout):
+    def _gv(self, op, k, encoding, timeout):
         if not self.waiting:
             self.socket.sendall(op)
             self._sendLenAndBytes(k)
@@ -94,26 +93,30 @@ class KVSClient(object):
             if not c:
                 raise socket.error("Connection closed")
             coding = c + recvall(self.socket, 3)
-        return self._recvValue(usePickle and coding == 'PYPK')
+        v = self._recvValue(encoding is True and coding == 'PYPK')
+        return v if type(encoding) == bool else (coding, v)
 
     def _monkey(self, k, v):
         self.socket.sendall('mkey')
         self._sendLenAndBytes(k)
         self._sendLenAndBytes(v)
 
-    def _put(self, k, v, usePickle=True):
-        if usePickle:
-            coding = 'PYPK'
-        else:
+    def _put(self, k, v, encoding):
+        if encoding is True:
+            v = PDS(v)
+            encoding = 'PYPK'
+        elif encoding is False:
             # TODO: Is this silent stringification two clever by half?
             # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
             if type(v) != str: v = repr(v)
-            coding = 'ASTR'
+            encoding = 'ASTR'
+        elif type(encoding) != str or len(encoding) != 4:
+            raise TypeError('Invalid encoding: %s'%encoding)
 
         self.socket.sendall('put_')
         self._sendLenAndBytes(k)
-        self.socket.sendall(coding)
-        self._sendLenAndBytes(v, usePickle)
+        self.socket.sendall(encoding)
+        self._sendLenAndBytes(v)
 
     def _shutdown(self):
         self.socket.sendall('down')
@@ -140,9 +143,10 @@ class KVSClient(object):
             # We could implement an explicit "cancel wait" call with a response to let this be canceled explicitly
             raise Exception("Previous %s timed out: you must retreive the previously requested %s value first." % self.waiting)
 
-    def _retry_gv(self, op, k, usePickle, timeout):
+    def _retry_gv(self, op, k, encoding, timeout):
         self._check_wait((op, k))
-        return self._retry(self._gv, op, k, usePickle, timeout)
+        return self._retry(self._gv, op, k, encoding, timeout)
+
 
     def connect(self):
         '''Reconnect, if necessary.  Can be used after an explicit close.'''
@@ -166,27 +170,33 @@ class KVSClient(object):
         self._check_wait()
         return self._retry(self._dump)
 
-    def get(self, key, usePickle=True, timeout=None):
+    def get(self, key, encoding=True, timeout=None):
         '''Retrieve and remove a value from the store.  If there is no value
         associated with this key, block until one is added by another client
         (with put).
+
+        If encoding is True, and the value was pickled, then the value will be
+        unpickled before being returned.  If encoding is False, just return the
+        raw value.  For anything else, return (encoding, value).
         
-        If usePickle is True, and the value was pickled, then the value will be
-        unpickled before being returned.  If timeout is not None, this will
-        only wait for timeout seconds before returning None.  In this case, you
-        MUST call this function again in the future until it returns a value
-        before doing any other operation, otherwise the value may be lost.
+        If timeout is not None, this will only wait for timeout seconds before
+        returning None.  In this case, you MUST call this function again in the
+        future until it returns a value before doing any other operation,
+        otherwise the value may be lost.
         '''
-        return self._retry_gv('get_', key, usePickle, timeout)
+        return self._retry_gv('get_', key, encoding, timeout)
 
-    def view(self, key, usePickle=True, timeout=None):
+    def view(self, key, encoding=True, timeout=None):
         '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
-        return self._retry_gv('view', key, usePickle, timeout)
+        return self._retry_gv('view', key, encoding, timeout)
 
-    def put(self, key, value, usePickle=True):
-        '''Add a value to the key, pickling it if usePickle.'''
+    def put(self, key, value, encoding=True):
+        '''Add a value to the key.  If encoding is True, pickle the value and
+        encode as PYPK.  If False, convert to string and store as ASTR.
+        Otherwise, encoding must be a 4 character string, and value must be a
+        string.'''
         self._check_wait()
-        return self._retry(self._put, key, value, usePickle)
+        return self._retry(self._put, key, value, encoding)
 
     def monkey(self, mkey, value):
         '''Make mkey a monitor key. Value encodes what events to monitor and
@@ -225,9 +235,9 @@ if '__main__' == __name__:
             items = getattr(namespace, 'ops', [])
             op = self.option_strings[1][2:]
             if op in ('get', 'view', 'put'):
-                pickle = getattr(namespace, 'pickle', False)
-                values.append(pickle)
-                if pickle and op == 'put':
+                encoding = getattr(namespace, 'encoding', False)
+                values.append(encoding)
+                if encoding is True and op == 'put':
                     values[1] = eval(values[1], {})
                 if op in ('get', 'view'):
                     values.append(getattr(namespace, 'timeout', None))
@@ -236,14 +246,15 @@ if '__main__' == __name__:
             namespace.ops = items
 
     argp = argparse.ArgumentParser(description='Command-line client to key-value storage server.')
-    argp.add_argument('-r', '--retry', default=0, type=int, help='Number of times to retry on failure')
-    argp.add_argument('-P', '--pickle', action='store_true', help='(Un-)Pickle values')
-    argp.add_argument('-R', '--no-pickle', dest='pickle', action='store_false', help="Don't (un-)pickle values")
-    argp.add_argument('-t', '--timeout', type=float, metavar='SECS', help='Timeout waiting for get/view')
+    argp.add_argument('-R', '--retry', default=0, type=int, metavar='COUNT', help='Number of times to retry on failure [0]')
+    argp.add_argument('-P', '--pickle', dest='encoding', action='store_true', help='(Un-)Pickle values to/from python expressions')
+    argp.add_argument('-A', '--no-pickle', dest='encoding', action='store_false', help="Don't (un-)pickle values (default)")
+    argp.add_argument('-E', '--encoding', dest='encoding', type=str, metavar='CODE', help='Explicitly set/get encoding (4-character string, ignored on get) [ASTR or PYPK with -P]')
+    argp.add_argument('-T', '--timeout', type=float, metavar='SECS', help='Timeout waiting for get/view')
     argp.add_argument('-d', '--dump', action=OpAction, nargs=0, help='Dump the current state')
     argp.add_argument('-g', '--get', action=OpAction, nargs=1, metavar='KEY', help='Retrieve and remove a value')
     argp.add_argument('-v', '--view', action=OpAction, nargs=1, metavar='KEY', help='Retrieve a value')
-    argp.add_argument('-p', '--put', action=OpAction, nargs=2, metavar=('KEY','VALUE'), help='Put a value (if pickling, evaluate as a python expression)')
+    argp.add_argument('-p', '--put', action=OpAction, nargs=2, metavar=('KEY','VALUE'), help='Put a value')
     argp.add_argument('-m', '--monkey', action=OpAction, nargs=2, metavar=('MKEY','KEY:EVENTS'), help='Create a monitor key in the KVS')
     argp.add_argument('-S', '--shutdown', action=OpAction, nargs=0, help='Tell the KVS to shutdown')
     argp.add_argument('-s', '--sleep', action=OpAction, nargs=1, type=float, metavar='SECS', help='Pause for a time')
@@ -259,7 +270,6 @@ if '__main__' == __name__:
         else:
             try:
                 r = getattr(kvs, op)(*cmd)
+                if r is not None: print(r)
             except Exception, e:
-                r = e
-            if r is not None:
-                print(r)
+                print >>sys.stderr, e
