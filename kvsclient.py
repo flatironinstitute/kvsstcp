@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import errno
 import os
 import socket
 import sys
@@ -73,15 +74,21 @@ class KVSClient(object):
             self.socket.sendall(op)
             self._sendLenAndBytes(k)
             self.waiting = (op, k)
-        self.socket.settimeout(timeout)
-        try:
-            c = self.socket.recv(1)
-        finally:
-            self.socket.settimeout(None)
-        if not c:
-            raise socket.error("Connection closed")
-        self.waiting = None
-        coding = c + recvall(self.socket, 3)
+        if timeout is None:
+            self.waiting = None
+            coding = recvall(self.socket, 4)
+        else:
+            self.socket.settimeout(timeout)
+            try:
+                c = self.socket.recv(1)
+            except socket.timeout, e:
+                return
+            finally:
+                self.socket.settimeout(None)
+            self.waiting = None
+            if not c:
+                raise socket.error("Connection closed")
+            coding = c + recvall(self.socket, 3)
         return self._recvValue(usePickle and coding == 'PYPK')
 
     def _monkey(self, k, v):
@@ -161,10 +168,9 @@ class KVSClient(object):
         
         If usePickle is True, and the value was pickled, then the value will be
         unpickled before being returned.  If timeout is not None, this will
-        only wait for timeout seconds before throwing a socket.timeout error.
-        In this case, you MUST call this function again in the future until it
-        returns a value before doing any other operation, otherwise the value
-        may be lost.
+        only wait for timeout seconds before returning None.  In this case, you
+        MUST call this function again in the future until it returns a value
+        before doing any other operation, otherwise the value may be lost.
         '''
         return self._retry_gv('get_', key, usePickle, timeout)
 
@@ -213,12 +219,12 @@ if '__main__' == __name__:
         def __call__(self, parser, namespace, values, option_string=None):
             items = getattr(namespace, 'ops', [])
             op = self.option_strings[1][2:]
-            if op in ['get', 'view', 'put']:
+            if op in ('get', 'view', 'put'):
                 pickle = getattr(namespace, 'pickle', False)
                 values.append(pickle)
                 if pickle and op == 'put':
                     values[1] = eval(values[1], {})
-                if op in ['get', 'view']:
+                if op in ('get', 'view'):
                     values.append(getattr(namespace, 'timeout', None))
             values.insert(0, op)
             items.append(values)
