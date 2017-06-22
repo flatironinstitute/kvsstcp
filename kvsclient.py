@@ -81,8 +81,13 @@ class KVSClient(object):
             self.socket.settimeout(timeout)
             try:
                 c = self.socket.recv(1)
-            except socket.timeout, e:
+            except socket.timeout:
                 return
+            except socket.error, e:
+                if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    return
+                else:
+                    raise
             finally:
                 self.socket.settimeout(None)
             self.waiting = None
