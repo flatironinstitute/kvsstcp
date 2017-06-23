@@ -18,6 +18,60 @@
 
 #define TRACE 1
 
+/* Connect to a KVS server at the given host and port.
+ * If either is 0, it is taken from the KVSSTCP_HOST and KVSSTCP_PORT
+ * environment variables.
+ * Returns a non-negative connection id (file descriptor) on success,
+ * or -1 on error (and sets errno).
+ */
+int kvs_connect(char *host, int port)
+{
+  char *sport;
+  char portbuf[8];
+
+  if (!host)
+    host = getenv("KVSSTCP_HOST");
+  if (port > 0) {
+    snprintf(portbuf, sizeof(portbuf), "%d", port);
+    sport = portbuf;
+  } else
+    sport = getenv("KVSSTCP_PORT");
+
+  struct addrinfo hints = {
+    .ai_family = AF_UNSPEC,
+    .ai_flags = AI_NUMERICSERV,
+    .ai_socktype = SOCK_STREAM,
+  };
+  struct addrinfo *ai = NULL;
+  if (!host || !sport || getaddrinfo(host, sport, &hints, &ai)) {
+    errno = ENOENT;
+    return -1;
+  }
+
+  int s = -1;
+  struct addrinfo *aip;
+  for (aip = ai; aip; aip = aip->ai_next) {
+    s = socket(aip->ai_family, aip->ai_socktype, aip->ai_protocol);
+    if (s < 0)
+      continue;
+    const int one = 1;
+    if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+      close(s);
+      s = -1;
+      continue;
+    }
+    if (connect(s, aip->ai_addr, aip->ai_addrlen) < 0) {
+      close(s);
+      s = -1;
+      continue;
+    }
+  }
+
+  if (ai)
+    freeaddrinfo(ai);
+  return s;
+}
+
 // This file includes both C and FORTRAN interfaces. It assumes the
 // convention that a FORTRAN string is represented in an argument list
 // twice: first by a pointer to the bytes of the strings, and second
@@ -110,47 +164,14 @@ gv(char* op, int *cinfo, char *k, void *v, int key_len)
 void
 kvsconnect_(int *cinfo)
 {
-  struct addrinfo	*aip, *aipsave;
-  struct addrinfo	hints = { 0 };
-  char			*host = getenv("KVSSTCP_HOST");
-  char			*port = getenv("KVSSTCP_PORT");
-  int			rc;
-  int			sfd;
-
-  //TODO: Allow these to be specified via invocation arguments too?
-  if (!host || !port) {
-    fprintf(stderr, "KVSSTCP_HOST and KVSSTCP_PORT environment variables must both be set.\n");
+  int s = kvs_connect(0, 0);
+  if (s < 0) {
+    fprintf(stderr, "Failed to connect to KVS server: %m.\n");
     exit(1);
   }
-
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_flags = AI_NUMERICSERV;
-  hints.ai_socktype = SOCK_STREAM;
-
-  if ((rc = getaddrinfo(host, port, &hints, &aipsave))) {
-    fprintf(stderr, "Failed to get address info for %s:%s (%d).\n", host, port, rc);
-    exit(1);
-  }
-
-  for (aip = aipsave; aip; aip = aip->ai_next) {
-    int	one = 1;
-    sfd = socket(aip->ai_family, aip->ai_socktype, aip->ai_protocol);
-    assert (0 == setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)));
-    if (-1 == sfd) continue;
-
-    if (0 == connect(sfd, aip->ai_addr, aip->ai_addrlen)) break;
-
-    close(sfd);
-  }
-
-  if (!aip) {
-    fprintf(stderr, "Failed to connect to %s:%s.\n", host, port);
-    exit(1);
-  }
-  cinfo[0] = sfd;
-
-  freeaddrinfo(aipsave);
+  *cinfo = s;
 }
+
 void
 kvsconnect(int *cinfo)
 {

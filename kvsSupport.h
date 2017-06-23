@@ -1,3 +1,7 @@
+/* C API */
+int kvs_connect(char *host, int port);
+
+/* Fortran-compatible API */
 void kvsconnect(int *cinfo);
 void kvsget(int *cinfo, char *k, void *v);
 void kvsput(int *cinfo, char *k, void *v, int nbytes);
