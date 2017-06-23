@@ -126,7 +126,7 @@ class KVSClient(object):
         self.socket.sendall('dump')
         return self._recvValue(True)
 
-    def get(self, key, encoding=True, timeout=None):
+    def get(self, key, encoding=True):
         '''Retrieve and remove a value from the store.  If there is no value
         associated with this key, block until one is added by another client
         (with put).
@@ -134,16 +134,24 @@ class KVSClient(object):
         If encoding is True, and the value was pickled, then the value will be
         unpickled before being returned.  If encoding is False, just return the
         raw value.  For anything else, return (encoding, value).
-        
+        '''
+        return self._get_view('get_', key, encoding)
+
+    def _get_nb(self, key, encoding=True, timeout=None):
+        '''Non-blocking get.
+
         If timeout is not None, this will only wait for timeout seconds before
         returning None.  In this case, you MUST call this function again in the
         future until it returns a value before doing any other operation,
-        otherwise the value may be lost.
-        '''
+        otherwise the value may be lost.'''
         return self._get_view('get_', key, encoding, timeout)
 
-    def view(self, key, encoding=True, timeout=None):
+    def view(self, key, encoding=True):
         '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
+        return self._get_view('view', key, encoding)
+
+    def _view_nb(self, key, encoding=True, timeout=None):
+        '''Non-blocking view.  See '_get_nb' and 'view'.'''
         return self._get_view('view', key, encoding, timeout)
 
     def put(self, key, value, encoding=True):
