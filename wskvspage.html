@@ -86,6 +86,33 @@
       var byVal = by(function(d) { return d.val || d.len; });
       var byCount = by(function(d) { return -d.waiters || +d.count; });
 
+      function renderJSON(e, j) {
+	if (typeof j === 'object') {
+	  if (Array.isArray(j)) {
+	    var f = document.createElement('ul');
+	    for (var x of j) {
+	      var g = document.createElement('li');
+	      renderJSON(g, x);
+	      f.appendChild(g);
+	    }
+	    e.appendChild(f);
+	  }
+	  else if (j) {
+	    var f = document.createElement('dl');
+	    for (var k in j) {
+	      var g = document.createElement('dt');
+	      g.textContent = k;
+	      f.appendChild(g);
+	      g = document.createElement('dd');
+	      renderJSON(g, j[k]);
+	      f.appendChild(g);
+	    }
+	    e.appendChild(f);
+	  }
+	} else
+	  e.appendChild(document.createTextNode(j));
+      }
+
       var keytable, keytemplate;
       var data = [];
       var keys = {};
@@ -125,21 +152,28 @@
             row.children[2].textContent = '[waiting: ' + d.waiters + ']';
           } else {
             var cell = row.children[1];
-            cell.textContent = (d.val || '');
-            if ('len' in d) {
-              var l = document.createElement('span');
-              l.className = 'len';
-              l.textContent = d.len;
-              cell.appendChild(l);
-            }
-            if (d.type !== 'ASTR') {
-              var t = document.createElement('span');
-              t.className = 'type';
-              t.textContent = d.type;
-              cell.insertBefore(t, cell.firstChild);
-            } else if (d.val.substr(0,6).toLowerCase() === '<html>') {
-              cell.innerHTML = d.val.substr(6);
-            }
+	    while (cell.firstChild)
+	      cell.removeChild(cell.firstChild);
+            if (d.type === 'HTML')
+              cell.innerHTML = d.val;
+	    else if (d.type === 'JSON')
+	      renderJSON(cell, d.val);
+            else {
+	      if (d.type !== 'ASTR') {
+		var t = document.createElement('span');
+		t.className = 'type';
+		t.textContent = d.type;
+		cell.appendChild(t);
+	      }
+	      if (d.val)
+		cell.appendChild(document.createTextNode(d.val));
+	      if (d.len != undefined) {
+		var l = document.createElement('span');
+		l.className = 'len';
+		l.textContent = d.len;
+		cell.appendChild(l);
+	      }
+	    }
             row.children[2].textContent = d.count;
           }
 
@@ -190,13 +224,22 @@
             return { key: w[0], waiters: w[1] };
           }).concat(msg[2].map(function (p) {
             // puts: [key, count, vrep]
-            // vrep: [type, len] or ['ASTR', len, trunc] or ['ASTR', val]
-            var s = p[2];
-            var d = { key: p[0], count: p[1], type: s.shift() };
-            if (s.length === 2 || d.type !== 'ASTR')
-              d.len = s.shift();
-            d.val = s.shift();
-            return d;
+            // vrep: [type, val?, len?]
+            var r = p[2];
+            p = { key: p[0], count: p[1], type: r[0], val: r[1], len: r[2] };
+	    if (p.type === 'ASTR' && p.val.substr(0,6).toLowerCase() === '<html>') {
+	      // backwards compatibility
+	      p.type = 'HTML';
+	      p.val = p.val.substr(6);
+	    } else if (p.type === 'JSON') {
+	      try {
+		p.val = JSON.parse(p.val);
+	      } catch (e) {
+		console.log("Couldn't parse JSON for " + p.key);
+		/* leave it as a string */
+	      }
+	    }
+	    return p;
           }));
           render();
         };

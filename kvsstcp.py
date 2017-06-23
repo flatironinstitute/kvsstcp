@@ -184,9 +184,11 @@ class KVS(object):
     def dump(self):
         '''Utility function that returns a snapshot of the KV store.'''
         def vrep(v):
-            if v[0] != 'ASTR': return (v[0], len(v[1]))
-            if v[1][:6].lower() == '<html>': return v
-            if len(v[1]) > 50: return (v[0], len(v[1]), v[1][:24] + '...' + v[1][-23:])
+            # Omit or truncate some values, in which cases add the original length as a third value
+            if v[0] == 'JSON' or v[0] == 'HTML': return v
+            if v[0] != 'ASTR': return (v[0], None, len(v[1]))
+            if v[1][:6].lower() == '<html>': return v # for backwards compatibility only
+            if len(v[1]) > 50: return (v[0], v[1][:24] + '...' + v[1][-23:], len(v[1]))
             return v
 
         return PDS(([self.opCounts['get'], self.opCounts['put'], self.opCounts['view'], self.opCounts['wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.iteritems() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.iteritems() if vv]))
