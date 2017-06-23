@@ -14,7 +14,7 @@ class KVSClient(object):
         '''Establish connection to a key value storage server at an address
         given by host, port or "host:port"
 
-        If retry > 0, retry any failed operation this many times.
+        If retry > 0, retry the connection this many times if it fails.
         '''
         if not host:
             host = os.environ.get('KVSSTCP_HOST', None)
@@ -28,22 +28,11 @@ class KVSClient(object):
             host, port = host.split(':')
 
         self.addr = (host, int(port))
-        self.retry = retry
         self.socket = None
         self.waiting = None
-        self.connect()
+        self.connect(retry)
 
     # Low-level network operations
-    def _connect(self):
-        if self.socket: return
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        try:
-            self.socket.connect(self.addr)
-        except socket.error:
-            self.socket = None
-            raise
-
     def _close(self):
         if not self.socket: return
         try:
@@ -64,11 +53,15 @@ class KVSClient(object):
         self.socket.sendall(AsciiLenFormat%len(payload))
         self.socket.sendall(payload)
 
-    def _dump(self):
-        self.socket.sendall('dump')
-        return self._recvValue(True)
+    def _check_wait(self, wait=None):
+        '''Make sure there's no outstanding get/view call that must be retried,
+        or at least that it matches the current operation.'''
+        if self.waiting and self.waiting != wait:
+            # We could implement an explicit "cancel wait" call with a response to let this be canceled explicitly
+            raise Exception("Previous %s timed out: you must retreive the previously requested %s value first." % self.waiting)
 
-    def _gv(self, op, k, encoding, timeout):
+    def _get_view(self, op, k, encoding, timeout=None):
+        self._check_wait((op, k))
         if not self.waiting:
             self.socket.sendall(op)
             self._sendLenAndBytes(k)
@@ -96,62 +89,24 @@ class KVSClient(object):
         v = self._recvValue(encoding is True and coding == 'PYPK')
         return v if type(encoding) == bool else (coding, v)
 
-    def _monkey(self, k, v):
-        self.socket.sendall('mkey')
-        self._sendLenAndBytes(k)
-        self._sendLenAndBytes(v)
 
-    def _put(self, k, v, encoding):
-        if encoding is True:
-            v = PDS(v)
-            encoding = 'PYPK'
-        elif encoding is False:
-            # TODO: Is this silent stringification two clever by half?
-            # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
-            if type(v) != str: v = repr(v)
-            encoding = 'ASTR'
-        elif type(encoding) != str or len(encoding) != 4:
-            raise TypeError('Invalid encoding: %s'%encoding)
-
-        self.socket.sendall('put_')
-        self._sendLenAndBytes(k)
-        self.socket.sendall(encoding)
-        self._sendLenAndBytes(v)
-
-    def _shutdown(self):
-        self.socket.sendall('down')
-
-    def _retry(self, act, *args):
-        '''Retry the given operation if it fails, reconnecting each time.'''
-        retry = 0
+    def connect(self, retry=0):
+        '''Reconnect, if necessary.  Can be used after an explicit close.'''
+        if self.socket: return
+        rep = 0
         while 1:
             try:
-                self._connect()
-                return act(*args)
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.socket.connect(self.addr)
+                return
             except socket.error, msg:
-                if retry >= self.retry: raise
+                self._close()
+                if rep >= retry: raise
                 print >>sys.stderr, 'kvs socket error: %s, retrying' % msg
-            self._close()
             # exponential backoff
-            time.sleep(2 ** retry)
-            retry += 1
-
-    def _check_wait(self, wait=None):
-        '''Make sure there's no outstanding get/view call that must be retried,
-        or at least that it matches the current operation.'''
-        if self.waiting and self.waiting != wait:
-            # We could implement an explicit "cancel wait" call with a response to let this be canceled explicitly
-            raise Exception("Previous %s timed out: you must retreive the previously requested %s value first." % self.waiting)
-
-    def _retry_gv(self, op, k, encoding, timeout):
-        self._check_wait((op, k))
-        return self._retry(self._gv, op, k, encoding, timeout)
-
-
-    def connect(self):
-        '''Reconnect, if necessary.  Can be used after an explicit close.'''
-        # _retry calls _connect
-        self._retry(lambda: None)
+            time.sleep(2 ** rep)
+            rep += 1
 
     def close(self):
         '''Close the connection to the KVS storage server. Does a socket shutdown as well.'''
@@ -168,7 +123,8 @@ class KVSClient(object):
     def dump(self):
         '''Returns a snapshot of the KV store and its statistics.'''
         self._check_wait()
-        return self._retry(self._dump)
+        self.socket.sendall('dump')
+        return self._recvValue(True)
 
     def get(self, key, encoding=True, timeout=None):
         '''Retrieve and remove a value from the store.  If there is no value
@@ -184,11 +140,11 @@ class KVSClient(object):
         future until it returns a value before doing any other operation,
         otherwise the value may be lost.
         '''
-        return self._retry_gv('get_', key, encoding, timeout)
+        return self._get_view('get_', key, encoding, timeout)
 
     def view(self, key, encoding=True, timeout=None):
         '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
-        return self._retry_gv('view', key, encoding, timeout)
+        return self._get_view('view', key, encoding, timeout)
 
     def put(self, key, value, encoding=True):
         '''Add a value to the key.  If encoding is True, pickle the value and
@@ -196,7 +152,21 @@ class KVSClient(object):
         Otherwise, encoding must be a 4 character string, and value must be a
         string.'''
         self._check_wait()
-        return self._retry(self._put, key, value, encoding)
+        if encoding is True:
+            value = PDS(value)
+            encoding = 'PYPK'
+        elif encoding is False:
+            # TODO: Is this silent stringification two clever by half?
+            # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
+            if type(value) != str: value = repr(v)
+            encoding = 'ASTR'
+        elif type(encoding) != str or len(encoding) != 4:
+            raise TypeError('Invalid encoding: %s'%encoding)
+
+        self.socket.sendall('put_')
+        self._sendLenAndBytes(key)
+        self.socket.sendall(encoding)
+        self._sendLenAndBytes(value)
 
     def monkey(self, mkey, value):
         '''Make mkey a monitor key. Value encodes what events to monitor and
@@ -212,12 +182,14 @@ class KVSClient(object):
         the specified key.
         '''
         self._check_wait()
-        return self._retry(self._monkey, mkey, value)
+        self.socket.sendall('mkey')
+        self._sendLenAndBytes(mkey)
+        self._sendLenAndBytes(value)
 
     def shutdown(self):
         '''Tell the KVS server to shutdown (and run the close() method for this client).'''
         try:
-            self._retry(self._shutdown)
+            self.socket.sendall('down')
         finally:
             self.close()
 
@@ -246,7 +218,7 @@ if '__main__' == __name__:
             namespace.ops = items
 
     argp = argparse.ArgumentParser(description='Command-line client to key-value storage server.')
-    argp.add_argument('-R', '--retry', default=0, type=int, metavar='COUNT', help='Number of times to retry on failure [0]')
+    argp.add_argument('-R', '--retry', default=0, type=int, metavar='COUNT', help='Number of times to retry on connect failure [0]')
     argp.add_argument('-P', '--pickle', dest='encoding', action='store_true', help='(Un-)Pickle values to/from python expressions')
     argp.add_argument('-A', '--no-pickle', dest='encoding', action='store_false', help="Don't (un-)pickle values (default)")
     argp.add_argument('-E', '--encoding', dest='encoding', type=str, metavar='CODE', help='Explicitly set/get encoding (4-character string, ignored on get) [ASTR or PYPK with -P]')
