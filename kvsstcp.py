@@ -238,7 +238,7 @@ class KVS(object):
         #DEBUGOFF        logger.debug('monkey: %s %s', mkey, v)
         if ':' not in v: return #TODO: Add some sort of error handling?
         self.monkeys.add(mkey)
-        k, events = v.split(':')
+        k, events = v.rsplit(':', 1)
         if not k: k = True
         for e, op  in [('g', 'get'), ('p', 'put'), ('v', 'view'), ('w', 'wait')]:
             if e in events:
