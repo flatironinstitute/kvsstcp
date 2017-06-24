@@ -48,7 +48,7 @@ lenChars = 10
 sendLen :: Net.Socket -> Int -> IO ()
 sendLen s l
   | c < 0 = fail "Network.KVS: data too long"
-  | otherwise = NetBS.sendAll s $ BSC.replicate (lenChars - c) ' ' <> d
+  | otherwise = NetBS.sendAll s $ BSC.replicate c ' ' <> d
   where
   d = BSL.toStrict $ BSB.toLazyByteString $ BSB.intDec l
   c = lenChars - BS.length d
@@ -66,7 +66,7 @@ recvLen s = parseLen =<< recvAll s lenChars where
 -- |Receive a length header followed by a block of data.
 -- Throws an EOF IO error on connection closed.
 recvLenBS :: Net.Socket -> IO BS.ByteString
-recvLenBS s = recvAll s =<< recvLen s
+recvLenBS s = recvLen s >>= recvAll s
 
 sendEncoding :: Net.Socket -> Encoding -> IO ()
 sendEncoding s = NetBS.sendAll s . fromEncoding

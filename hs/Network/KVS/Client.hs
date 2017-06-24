@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Network.KVS.Client
-  ( connect
+  ( KVSClient
+  , connect
   , close
   , shutdown
   , put

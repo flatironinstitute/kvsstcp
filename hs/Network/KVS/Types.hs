@@ -9,6 +9,7 @@ module Network.KVS.Types
   , EncodedValue
   , Event(..)
   , eventChar
+  , parseEvents
   ) where
 
 import qualified Data.ByteString as BS
@@ -24,6 +25,9 @@ data Encoding = Encoding !Word8 !Word8 !Word8 !Word8
 
 fromEncoding :: Encoding -> BS.ByteString
 fromEncoding (Encoding a b c d) = BS.pack [a,b,c,d]
+
+instance Show Encoding where
+  showsPrec p = showsPrec p . fromEncoding
 
 toEncoding :: BS.ByteString -> Encoding
 toEncoding s = case BS.unpack s of
@@ -52,3 +56,13 @@ eventChar EventGet = c2w 'g'
 eventChar EventPut = c2w 'p'
 eventChar EventView = c2w 'v'
 eventChar EventWait = c2w 'w'
+
+charEvent :: Char -> Maybe Event
+charEvent 'g' = Just EventGet
+charEvent 'p' = Just EventPut
+charEvent 'v' = Just EventView
+charEvent 'w' = Just EventWait
+charEvent _ = Nothing
+
+parseEvents :: String -> Maybe [Event]
+parseEvents = mapM charEvent
