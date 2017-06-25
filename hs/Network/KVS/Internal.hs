@@ -1,12 +1,14 @@
 module Network.KVS.Internal
   ( -- * IO
+    recvAll
+
     -- ** Data blocks
-    sendLenBS
+  , sendLenBS
   , recvLenBS
 
-    -- ** Encodings
-  , sendEncoding
-  , recvEncoding
+    -- ** Encoded Values
+  , sendEncodedValue
+  , recvEncodedValue
   ) where
 
 import           Control.Monad (guard, unless)
@@ -73,3 +75,11 @@ sendEncoding s = NetBS.sendAll s . fromEncoding
 
 recvEncoding :: Net.Socket -> IO Encoding
 recvEncoding s = toEncoding <$> recvAll s 4
+
+sendEncodedValue :: Net.Socket -> EncodedValue -> IO ()
+sendEncodedValue s (e, v) = do
+  sendEncoding s e
+  sendLenBS s v
+
+recvEncodedValue :: Net.Socket -> IO EncodedValue
+recvEncodedValue s = (,) <$> recvEncoding s <*> recvLenBS s

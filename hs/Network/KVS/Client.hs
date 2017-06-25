@@ -73,17 +73,16 @@ shutdown kvs@(KVSClient s) =
 
 -- |Add a value to the key.
 put :: KVSClient -> Key -> EncodedValue -> IO ()
-put (KVSClient s) k (e, v) = do
+put (KVSClient s) k ev = do
   NetBS.sendAll s "put_"
   sendLenBS s k
-  sendEncoding s e
-  sendLenBS s v
+  sendEncodedValue s ev
 
 getView :: BS.ByteString -> KVSClient -> Key -> IO EncodedValue
 getView op (KVSClient s) k = do
   NetBS.sendAll s op
   sendLenBS s k
-  (,) <$> recvEncoding s <*> recvLenBS s
+  recvEncodedValue s
 
 -- |Retrieve and remove a value from the store.  If there is no value associated with this key, block until one is added by another client (with 'put').
 get :: KVSClient -> Key -> IO EncodedValue
