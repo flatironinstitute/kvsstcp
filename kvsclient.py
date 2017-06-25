@@ -220,6 +220,7 @@ if '__main__' == __name__:
                 if encoding is True and op == 'put':
                     values[1] = eval(values[1], {})
                 if op in ('get', 'view'):
+                    op = '_'+op+'_nb'
                     values.append(getattr(namespace, 'timeout', None))
             values.insert(0, op)
             items.append(values)
