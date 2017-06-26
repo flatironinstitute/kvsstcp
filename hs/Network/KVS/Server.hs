@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 
@@ -11,11 +12,17 @@ import           Control.Concurrent (myThreadId, forkFinally)
 import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVar_, tryPutMVar, takeMVar, tryTakeMVar, readMVar)
 import           Control.Exception (mask_)
 import           Control.Monad (when, unless, forever)
-import qualified Data.List.NonEmpty as NE
+#ifdef VERSION_unordered_containers
+import           Data.Hashable (Hashable)
+import qualified Data.HashMap.Strict as Map
+import qualified Data.HashSet as Set
+#else
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+#endif
+import qualified Data.List.NonEmpty as NE
 import           Data.Maybe (fromMaybe)
 import           Data.Semigroup (Semigroup(..))
-import qualified Data.Set as Set
 import           Data.Tuple (swap)
 import qualified Network.Socket as Net
 #ifdef VERSION_unix
@@ -33,6 +40,14 @@ instance Ord ResourceLimit where
   _ <= ResourceLimitUnknown = False
   _ <= ResourceLimitInfinity = True
   ResourceLimitInfinity <= _ = False
+#endif
+
+#ifdef VERSION_unordered_containers
+type Map = Map.HashMap
+type Mappable a = (Eq a, Hashable a)
+#else
+type Map = Map.Map
+type Mappable a = Ord a
 #endif
 
 logger :: String -> IO ()
@@ -63,15 +78,17 @@ queueLength :: Queue a -> Int
 queueLength (Queue h (_ NE.:| t)) = succ $ length h + length t
 
 -- |Lookup the given key in the map, inserting and returning an empty 'MVar' if missing.
-mvLookup :: Ord k => k -> Map.Map k (MVar a) -> IO (MVar a, Map.Map k (MVar a))
+mvLookup :: Mappable k => k -> Map k (MVar a) -> IO (MVar a, Map k (MVar a))
 mvLookup k m = do
-#if 1
+#if 0
   v <- newEmptyMVar -- this version wastes an allocation to save an additional lookup
   return $ first (fromMaybe v) $ Map.insertLookupWithKey (\_ _ -> id) k v m
 #else
   -- this version is more portable to other map implementations
   maybe
-    ((, Map.insert k v m) <$> newEmptyMVar)
+    (do
+      v <- newEmptyMVar
+      return (v, Map.insert k v m))
     (return . (, m))
     $ Map.lookup k m
 #endif
@@ -87,19 +104,11 @@ replaceMVar v f = mask_ . loop where
 
 -- |An 'MVar' 'Queue' that represents a queue of values, or an empty MVar when empty
 type MVQ a = MVar (Queue a)
-type KVS = Map.Map Key (MVQ EncodedValue)
+type KVS = Map Key (MVQ EncodedValue)
 
 client :: MVar KVS -> Net.Socket -> Net.SockAddr -> IO Bool
 client mkvs s a = loop where
   loop = recvAll s 4 >>= cmd
-  cmd "clos" = do
-    Net.shutdown s Net.ShutdownBoth
-    return False
-  cmd "down" =
-    return True
-  cmd "dump" = do
-    fail "TODO"
-    loop
   cmd "put_" = do
     key <- recvLenBS s
     ev <- recvEncodedValue s
@@ -119,6 +128,14 @@ client mkvs s a = loop where
     ev <- queueView <$> readMVar v
     sendEncodedValue s ev
     loop
+  cmd "dump" = do
+    fail "TODO"
+    loop
+  cmd "clos" = do
+    Net.shutdown s Net.ShutdownBoth
+    return False
+  cmd "down" =
+    return True
   cmd c = fail $ "unknown op: " ++ show c
   recvmv = do
     key <- recvLenBS s
@@ -150,6 +167,7 @@ serve a = do
   forever $ do
     (c, ca) <- Net.accept s
     logger $ "Acceped connect from " ++ show ca
+    Net.setSocketOption c Net.NoDelay 1
     tid <- forkFinally
       (client kvs c ca)
       (\r -> do
