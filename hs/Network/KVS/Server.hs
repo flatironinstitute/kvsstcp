@@ -7,10 +7,11 @@ module Network.KVS.Server
   ( serve
   ) where
 
+import           Control.Arrow ((***), second)
 import           Control.Concurrent (myThreadId, forkFinally)
-import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVar_, tryPutMVar, takeMVar, tryTakeMVar, readMVar)
+import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVar_, tryPutMVar, takeMVar, readMVar, tryReadMVar)
 import           Control.Exception (mask_)
-import           Control.Monad (when, unless, forever)
+import           Control.Monad (when, forever)
 #ifdef VERSION_unordered_containers
 import           Data.Hashable (Hashable)
 import qualified Data.HashMap.Strict as Map
@@ -19,7 +20,6 @@ import qualified Data.HashSet as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 #endif
-import           Data.Semigroup (Semigroup(..))
 import           Data.Tuple (swap)
 import qualified Network.Socket as Net
 #ifdef VERSION_unix
@@ -51,56 +51,59 @@ type Mappable a = Ord a
 logger :: String -> IO ()
 logger = hPutStrLn stderr
 
--- |Lookup the given key in the map, inserting and returning an empty 'MVar' if missing.
-mvLookup :: Mappable k => k -> Map k (MVar a) -> IO (MVar a, Map k (MVar a))
-mvLookup k m = do
-#if 0
-  v <- newEmptyMVar -- this version wastes an allocation to save an additional lookup
-  return $ first (fromMaybe v) $ Map.insertLookupWithKey (\_ _ -> id) k v m
-#else
-  -- this version is more portable to other map implementations
-  maybe
-    (do
-      v <- newEmptyMVar
-      return (v, Map.insert k v m))
-    (return . (, m))
-    $ Map.lookup k m
-#endif
+data Store a
+  = StoreQueue !(Q.Queue a)
+  | StoreMVar !(MVar a)
 
--- |Populate an 'MVar', either with a value if it's empty, or by applying a function to that value and the current value if non-empty.
--- Asynchronous exceptions are masked during this operation, but no other exception handing is done.
-replaceMVar :: MVar a -> (a -> a -> a) -> a -> IO ()
-replaceMVar v f = mask_ . loop where
-  loop s = do
-    r <- tryPutMVar v s
-    unless r $
-      loop . maybe s (f s) =<< tryTakeMVar v
+type KVS = Map Key ((Store EncodedValue))
 
--- |An 'MVar' 'Q.Queue' that represents a queue of values, or an empty MVar when empty
-type MVQ a = MVar (Q.Queue a)
-type KVS = Map Key (MVQ EncodedValue)
+putStore :: MVar a -> a -> IO (Store a)
+putStore v x = do
+  r <- tryPutMVar v x
+  if r
+    then return $ StoreMVar v
+    else maybe
+      (putStore v x)
+      (return . StoreQueue . Q.doubleton x)
+      =<< tryReadMVar v
+
+getViewStore :: Mappable k => (Q.Queue a -> (Map k (Store a) -> Map k (Store a), a)) -> k -> Map k (Store a) -> IO (Map k (Store a), Either (MVar a) a)
+getViewStore f k m = case Map.lookup k m of
+  Nothing -> do
+    v <- newEmptyMVar
+    return (Map.insert k (StoreMVar v) m, Left v)
+  Just (StoreMVar v) ->
+    return (m, Left v)
+  Just (StoreQueue q) ->
+    return $ ($ m) *** Right $ f q
 
 client :: MVar KVS -> Net.Socket -> Net.SockAddr -> IO Bool
 client mkvs s a = loop where
   loop = recvAll s 4 >>= cmd
   cmd "put_" = do
     key <- recvLenBS s
-    ev <- recvEncodedValue s
+    val <- recvEncodedValue s
     modifyMVar_ mkvs $ \kvs -> do
-      (v, kvs') <- mvLookup key kvs
-      replaceMVar v (flip (<>)) $ Q.singleton ev
-      return kvs'
+      s' <- case Map.lookup key kvs of
+        Nothing             -> -- return $ StoreQueue $ Q.singleton val
+          StoreMVar <$> newMVar val
+        Just (StoreQueue q) -> return $ StoreQueue $ Q.put val q
+        Just (StoreMVar v)  -> putStore v val
+      return $ Map.insert key s' kvs
     loop
   cmd "get_" = do
-    v <- recvmv
-    (ev, q) <- Q.get <$> takeMVar v
-    mapM_ (replaceMVar v (<>)) q
-    sendEncodedValue s ev
+    key <- recvLenBS s
+    ev <- modifyMVar mkvs $
+      getViewStore (swap . second (maybe (Map.delete key) (Map.insert key . StoreQueue)) . Q.get) key
+    val <- either takeMVar return ev
+    sendEncodedValue s val
     loop
   cmd "view" = do
-    v <- recvmv
-    ev <- Q.view <$> readMVar v
-    sendEncodedValue s ev
+    key <- recvLenBS s
+    ev <- modifyMVar mkvs $
+      getViewStore ((,) id . Q.view) key
+    val <- either readMVar return ev
+    sendEncodedValue s val
     loop
   cmd "dump" = do
     fail "TODO"
@@ -111,10 +114,6 @@ client mkvs s a = loop where
   cmd "down" =
     return True
   cmd c = fail $ "unknown op: " ++ show c
-  recvmv = do
-    key <- recvLenBS s
-    modifyMVar mkvs $
-      fmap swap . mvLookup key
 
 serve :: Net.SockAddr -> IO ()
 serve sa = do

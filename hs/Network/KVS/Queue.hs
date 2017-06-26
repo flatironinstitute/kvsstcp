@@ -1,6 +1,8 @@
 module Network.KVS.Queue
   ( Queue
   , singleton
+  , doubleton
+  , put
   , get
   , view
   , length
@@ -24,6 +26,13 @@ instance Semigroup (Queue a) where
 
 singleton :: a -> Queue a
 singleton a = Queue [] (a NE.:| [])
+
+doubleton :: a -> a -> Queue a
+doubleton a b = Queue [] (a NE.:| [b])
+
+-- |Add a value to the end of the queue.
+put :: a -> Queue a -> Queue a
+put x (Queue r w) = Queue r (NE.cons x w)
 
 -- |Take the oldest value off the front of a queue and return the remaining queue (if non-empty). Amortized /O(1)/.
 get :: Queue a -> (a, Maybe (Queue a))
