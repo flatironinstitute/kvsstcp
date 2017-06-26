@@ -7,7 +7,6 @@ module Network.KVS.Server
   ( serve
   ) where
 
-import           Control.Arrow (first)
 import           Control.Concurrent (myThreadId, forkFinally)
 import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVar_, tryPutMVar, takeMVar, tryTakeMVar, readMVar)
 import           Control.Exception (mask_)
@@ -20,8 +19,6 @@ import qualified Data.HashSet as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 #endif
-import qualified Data.List.NonEmpty as NE
-import           Data.Maybe (fromMaybe)
 import           Data.Semigroup (Semigroup(..))
 import           Data.Tuple (swap)
 import qualified Network.Socket as Net
@@ -32,6 +29,7 @@ import           System.IO (hPutStrLn, stderr)
 
 import           Network.KVS.Types
 import           Network.KVS.Internal
+import qualified Network.KVS.Queue as Q
 
 #ifdef VERSION_unix
 instance Ord ResourceLimit where
@@ -52,30 +50,6 @@ type Mappable a = Ord a
 
 logger :: String -> IO ()
 logger = hPutStrLn stderr
-
--- |A non-empty FIFO queue that also provides an efficient view operation for the most-recently added value at the tail.
-data Queue a = Queue
-  { _queueRead :: [a]
-  , _queueWrite :: !(NE.NonEmpty a)
-  }
-
-instance Semigroup (Queue a) where
-  Queue r1 w1 <> Queue [] w2 = Queue r1 (w2 <> w1)
-  Queue r1 (w NE.:| w1) <> Queue r2 w2 = Queue (r1 ++ reverse w1 ++ w : r2) w2
-
-queueSingleton :: a -> Queue a
-queueSingleton a = Queue [] (a NE.:| [])
-
-queueGet :: Queue a -> (a, Maybe (Queue a))
-queueGet (Queue [] (t NE.:| [])) = (t, Nothing)
-queueGet (Queue (h:l) t) = (h, Just (Queue l t))
-queueGet (Queue [] (t NE.:| r)) = (h, Just (Queue l (t NE.:| []))) where h:l = reverse r
-
-queueView :: Queue a -> a
-queueView (Queue _ (t NE.:| _)) = t
-
-queueLength :: Queue a -> Int
-queueLength (Queue h (_ NE.:| t)) = succ $ length h + length t
 
 -- |Lookup the given key in the map, inserting and returning an empty 'MVar' if missing.
 mvLookup :: Mappable k => k -> Map k (MVar a) -> IO (MVar a, Map k (MVar a))
@@ -102,8 +76,8 @@ replaceMVar v f = mask_ . loop where
     unless r $
       loop . maybe s (f s) =<< tryTakeMVar v
 
--- |An 'MVar' 'Queue' that represents a queue of values, or an empty MVar when empty
-type MVQ a = MVar (Queue a)
+-- |An 'MVar' 'Q.Queue' that represents a queue of values, or an empty MVar when empty
+type MVQ a = MVar (Q.Queue a)
 type KVS = Map Key (MVQ EncodedValue)
 
 client :: MVar KVS -> Net.Socket -> Net.SockAddr -> IO Bool
@@ -114,18 +88,18 @@ client mkvs s a = loop where
     ev <- recvEncodedValue s
     modifyMVar_ mkvs $ \kvs -> do
       (v, kvs') <- mvLookup key kvs
-      replaceMVar v (flip (<>)) $ queueSingleton ev
+      replaceMVar v (flip (<>)) $ Q.singleton ev
       return kvs'
     loop
   cmd "get_" = do
     v <- recvmv
-    (ev, q) <- queueGet <$> takeMVar v
+    (ev, q) <- Q.get <$> takeMVar v
     mapM_ (replaceMVar v (<>)) q
     sendEncodedValue s ev
     loop
   cmd "view" = do
     v <- recvmv
-    ev <- queueView <$> readMVar v
+    ev <- Q.view <$> readMVar v
     sendEncodedValue s ev
     loop
   cmd "dump" = do
@@ -143,7 +117,7 @@ client mkvs s a = loop where
       fmap swap . mvLookup key
 
 serve :: Net.SockAddr -> IO ()
-serve a = do
+serve sa = do
 #ifdef VERSION_unix
   nof <- getResourceLimit ResourceOpenFiles
   let tnof = min (hardLimit nof) (ResourceLimit 4096)
@@ -153,13 +127,13 @@ serve a = do
   clients <- newMVar Set.empty
   kvs <- newMVar Map.empty
   
-  s <- Net.socket (case a of
+  s <- Net.socket (case sa of
     Net.SockAddrInet{} -> Net.AF_INET
     Net.SockAddrInet6{} -> Net.AF_INET6
     Net.SockAddrUnix{} -> Net.AF_UNIX
     Net.SockAddrCan{} -> Net.AF_CAN) Net.Stream Net.defaultProtocol
   Net.setSocketOption s Net.ReuseAddr 1
-  Net.bind s a
+  Net.bind s sa
   a <- Net.getSocketName s
   logger $ "Server running at " ++ show a
   Net.listen s 4000
