@@ -9,7 +9,7 @@ module Network.KVS.Server
   ) where
 
 import           Control.Concurrent (myThreadId, forkFinally)
-import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVar_, putMVar, tryPutMVar, takeMVar, readMVar, tryReadMVar)
+import           Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_)
 import           Control.Exception (mask_)
 import           Control.Monad (when, forever)
 #ifdef VERSION_unordered_containers
@@ -28,7 +28,7 @@ import           System.IO (hPutStrLn, stderr)
 
 import           Network.KVS.Types
 import           Network.KVS.Internal
-import qualified Network.KVS.Queue as Q
+import           Network.KVS.MQueue
 
 #ifdef VERSION_unix
 instance Ord ResourceLimit where
@@ -50,59 +50,32 @@ type Mappable a = Ord a
 logger :: String -> IO ()
 logger = hPutStrLn stderr
 
-data Store a
-  = StoreQueue !(Q.Queue a)
-  | StoreMVar !(MVar a)
+type KVS = Map Key (MQueue EncodedValue)
 
-type KVS = Map Key (MVar (Store EncodedValue))
-
-lookupStore :: Mappable k => k -> Map k (MVar (Store a)) -> IO (Map k (MVar (Store a)), MVar (Store a))
-lookupStore k m = maybe
+lookupMQueue :: Mappable k => k -> Map k (MQueue a) -> IO (Map k (MQueue a), MQueue a)
+lookupMQueue k m = maybe
   (do
-    e <- newEmptyMVar
-    v <- newMVar (StoreMVar e)
-    return (Map.insert k v m, v))
+    q <- newMQueue
+    return (Map.insert k q m, q))
   (return . (,) m)
   $ Map.lookup k m
-
-putStore :: MVar a -> a -> IO (Store a)
-putStore v x = do
-  r <- tryPutMVar v x
-  if r
-    then return $ StoreMVar v
-    else maybe
-      (putStore v x)
-      (return . StoreQueue . Q.doubleton x)
-      =<< tryReadMVar v
 
 client :: MVar KVS -> Net.Socket -> Net.SockAddr -> IO Bool
 client mkvs s a = loop where
   loop = recvAll s 4 >>= cmd
   cmd "put_" = do
-    key <- recvLenBS s
+    q <- getkeyq
     val <- recvEncodedValue s
-    sv <- modifyMVar mkvs $ lookupStore key 
-    modifyMVar_ sv $ \st -> case st of
-      StoreMVar v -> putStore v val
-      StoreQueue q -> return $ StoreQueue $ Q.put val q
+    putMQueue val q
     loop
   cmd "get_" = do
-    key <- recvLenBS s
-    sv <- modifyMVar mkvs $ lookupStore key
-    v <- modifyMVar sv $ \st -> case st of
-      StoreMVar v -> return (st, Left v)
-      StoreQueue (Q.get -> (x, q)) ->
-        (, Right x) <$> maybe (StoreMVar <$> newEmptyMVar) (return . StoreQueue) q
-    val <- either takeMVar return v
+    q <- getkeyq
+    val <- getMQueue q
     sendEncodedValue s val
     loop
   cmd "view" = do
-    key <- recvLenBS s
-    sv <- modifyMVar mkvs $ lookupStore key
-    st <- readMVar sv
-    val <- case st of
-      StoreMVar v -> readMVar v
-      StoreQueue q -> return $ Q.view q
+    q <- getkeyq
+    val <- viewMQueue q
     sendEncodedValue s val
     loop
   cmd "dump" = do
@@ -114,6 +87,7 @@ client mkvs s a = loop where
   cmd "down" =
     return True
   cmd c = fail $ "unknown op: " ++ show c
+  getkeyq = modifyMVar mkvs . lookupMQueue =<< recvLenBS s
 
 serve :: Net.SockAddr -> IO ()
 serve sa = do
