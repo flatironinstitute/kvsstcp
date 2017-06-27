@@ -56,15 +56,13 @@ data Store a
 
 type KVS = Map Key (MVar (Store EncodedValue))
 
-lookupStore :: Mappable k => k -> Map k (MVar (Store a)) -> IO (Map k (MVar (Store a)), (MVar (Store a), Store a))
+lookupStore :: Mappable k => k -> Map k (MVar (Store a)) -> IO (Map k (MVar (Store a)), MVar (Store a))
 lookupStore k m = maybe
   (do
     e <- newEmptyMVar
-    v <- newEmptyMVar
-    return (Map.insert k v m, (v, StoreMVar e)))
-  (\v -> do
-    s <- takeMVar v
-    return (m, (v, s)))
+    v <- newMVar (StoreMVar e)
+    return (Map.insert k v m, v))
+  (return . (,) m)
   $ Map.lookup k m
 
 putStore :: MVar a -> a -> IO (Store a)
@@ -83,26 +81,25 @@ client mkvs s a = loop where
   cmd "put_" = do
     key <- recvLenBS s
     val <- recvEncodedValue s
-    (sv, st) <- modifyMVar mkvs $ lookupStore key 
-    putMVar sv =<< case st of
+    sv <- modifyMVar mkvs $ lookupStore key 
+    modifyMVar_ sv $ \st -> case st of
       StoreMVar v -> putStore v val
       StoreQueue q -> return $ StoreQueue $ Q.put val q
     loop
   cmd "get_" = do
     key <- recvLenBS s
-    (sv, st) <- modifyMVar mkvs $ lookupStore key
-    (v, st') <- case st of
-      StoreMVar v -> return (Left v, st)
+    sv <- modifyMVar mkvs $ lookupStore key
+    v <- modifyMVar sv $ \st -> case st of
+      StoreMVar v -> return (st, Left v)
       StoreQueue (Q.get -> (x, q)) ->
-        (Right x, ) <$> maybe (StoreMVar <$> newEmptyMVar) (return . StoreQueue) q
-    putMVar sv st'
+        (, Right x) <$> maybe (StoreMVar <$> newEmptyMVar) (return . StoreQueue) q
     val <- either takeMVar return v
     sendEncodedValue s val
     loop
   cmd "view" = do
     key <- recvLenBS s
-    (sv, st) <- modifyMVar mkvs $ lookupStore key
-    putMVar sv st
+    sv <- modifyMVar mkvs $ lookupStore key
+    st <- readMVar sv
     val <- case st of
       StoreMVar v -> readMVar v
       StoreQueue q -> return $ Q.view q
