@@ -8,9 +8,9 @@ module Network.KVS.Server
   ( serve
   ) where
 
-import           Control.Concurrent (myThreadId, forkFinally)
-import           Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_)
-import           Control.Exception (mask_)
+import           Control.Concurrent (myThreadId, forkIOWithUnmask, killThread)
+import           Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_, readMVar)
+import           Control.Exception (SomeException, AsyncException, handle, try, mask_)
 import           Control.Monad (when, forever)
 #ifdef VERSION_unordered_containers
 import           Data.Hashable (Hashable)
@@ -61,7 +61,7 @@ lookupMQueue k m = maybe
   $ Map.lookup k m
 
 client :: MVar KVS -> Net.Socket -> Net.SockAddr -> IO Bool
-client mkvs s a = loop where
+client mkvs s _a = loop where
   loop = recvAll s 4 >>= cmd
   cmd "put_" = do
     q <- getkeyq
@@ -97,6 +97,7 @@ serve sa = do
   when (softLimit nof < tnof) $
     setResourceLimit ResourceOpenFiles nof{ softLimit = tnof }
 #endif
+
   clients <- newMVar Set.empty
   kvs <- newMVar Map.empty
   
@@ -111,15 +112,19 @@ serve sa = do
   logger $ "Server running at " ++ show a
   Net.listen s 4000
 
-  forever $ do
+  pid <- myThreadId
+  handle (\e -> logger $ "Shutting down: " ++ show (e :: AsyncException)) $ mask_ $ forever $ do
     (c, ca) <- Net.accept s
     logger $ "Acceped connect from " ++ show ca
     Net.setSocketOption c Net.NoDelay 1
-    tid <- forkFinally
-      (client kvs c ca)
-      (\r -> do
-        tid <- myThreadId
-        modifyMVar_ clients $ return . Set.delete tid
-        logger $ "Closing connection from " ++ show ca ++ either ((": " ++) . show) (const "") r
-        Net.close c)
+    tid <- forkIOWithUnmask $ \unmask -> do
+      r <- try $ unmask $ client kvs c ca
+      tid <- myThreadId
+      modifyMVar_ clients $ return . Set.delete tid
+      unmask $ do
+        logger $ "Closing connection from " ++ show ca ++ either (\e -> ": " ++ show (e :: SomeException)) (const "") r
+        Net.close c
+        when (either (const False) id r) $ killThread pid
     modifyMVar_ clients $ return . Set.insert tid
+
+  mapM_ killThread =<< readMVar clients
