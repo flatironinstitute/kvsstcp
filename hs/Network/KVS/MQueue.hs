@@ -9,7 +9,7 @@ module Network.KVS.MQueue
   , viewMQueue
   ) where
 
-import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, putMVar, takeMVar, readMVar, tryReadMVar, withMVar)
+import           Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVarMasked, putMVar, takeMVar, readMVar, tryReadMVar, withMVar)
 import           Control.Exception (mask_)
 
 -- |Each 'MQueueEntry' must either be full or '_mqueueWrite'
@@ -58,10 +58,10 @@ putMQueue x (MQueue _ t) = do
 
 -- |Get the first value from an 'MQueue', blocking if necessary.
 getMQueue :: MQueue a -> IO a
-getMQueue (MQueue r _) = modifyMVar r $ \v -> do
+getMQueue (MQueue r _) = modifyMVarMasked r $ \v -> do
   MQueueItem x n <- takeMVar v
-  -- possible race condition here: an asynchronous exception will leave _mqueueRead's entry empty
-  -- but we want to use 'takeMVar' rather than 'readMVar' to make sure '_mqueueLast' is invalidated (though there are other ways around this)
+  -- possible race condition here: an exception will leave _mqueueRead's entry empty
+  -- but we want to use 'takeMVar' rather than 'readMVar' to make sure '_mqueueLast' is invalidated (though there are other ways around this, like guarding '_mqueueItem' with 'Maybe')
   return (n, x)
 
 -- |Get the last, most recently-added value from an 'MQueue', blocking if necessary.

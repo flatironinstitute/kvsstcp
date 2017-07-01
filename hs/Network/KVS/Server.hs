@@ -8,9 +8,9 @@ module Network.KVS.Server
   ( serve
   ) where
 
-import           Control.Concurrent (myThreadId, forkIOWithUnmask, killThread)
+import           Control.Concurrent (ThreadId, myThreadId, forkIOWithUnmask, throwTo, killThread, threadWaitRead)
 import           Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_, readMVar)
-import           Control.Exception (SomeException, AsyncException, handle, try, mask_)
+import           Control.Exception (Exception(..), SomeException, AsyncException, asyncExceptionToException, asyncExceptionFromException, catch, handle, try, mask, mask_)
 import           Control.Monad (when, forever)
 #ifdef VERSION_unordered_containers
 import           Data.Hashable (Hashable)
@@ -24,6 +24,7 @@ import qualified Network.Socket as Net
 #ifdef VERSION_unix
 import           System.Posix.Resource (getResourceLimit, setResourceLimit, Resource(ResourceOpenFiles), softLimit, hardLimit, ResourceLimit(..))
 #endif
+import           System.Posix.Types (Fd(Fd))
 import           System.IO (hPutStrLn, stderr)
 
 import           Network.KVS.Types
@@ -50,6 +51,12 @@ type Mappable a = Ord a
 logger :: String -> IO ()
 logger = hPutStrLn stderr
 
+data StopWaiting = StopWaiting
+  deriving (Show)
+instance Exception StopWaiting where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
+
 type KVS = Map Key (MQueue EncodedValue)
 
 lookupMQueue :: Mappable k => k -> Map k (MQueue a) -> IO (Map k (MQueue a), MQueue a)
@@ -60,8 +67,8 @@ lookupMQueue k m = maybe
   (return . (,) m)
   $ Map.lookup k m
 
-client :: MVar KVS -> Net.Socket -> Net.SockAddr -> IO Bool
-client mkvs s _a = loop where
+client :: MVar KVS -> Net.Socket -> Net.SockAddr -> ThreadId -> IO Bool
+client mkvs s _a tid = loop where
   loop = recvAll s 4 >>= cmd
   cmd "put_" = do
     q <- getkeyq
@@ -70,13 +77,13 @@ client mkvs s _a = loop where
     loop
   cmd "get_" = do
     q <- getkeyq
-    val <- getMQueue q
-    sendEncodedValue s val
+    val <- wait $ getMQueue q
+    mapM_ (sendEncodedValue s) val
     loop
   cmd "view" = do
     q <- getkeyq
-    val <- viewMQueue q
-    sendEncodedValue s val
+    val <- wait $ viewMQueue q
+    mapM_ (sendEncodedValue s) val
     loop
   cmd "dump" = do
     fail "TODO"
@@ -88,6 +95,15 @@ client mkvs s _a = loop where
     return True
   cmd c = fail $ "unknown op: " ++ show c
   getkeyq = modifyMVar mkvs . lookupMQueue =<< recvLenBS s
+  wait f = mask $ \unmask -> do
+    wid <- forkIOWithUnmask ($ do
+      threadWaitRead $ Fd $ Net.fdSocket s
+      throwTo tid StopWaiting)
+    -- we don't explicitly unmask f: instead only allow interruptions while blocked, otherwise defer the StopWaiting
+    r <- (Just <$> f) `catch` \StopWaiting -> return Nothing
+    -- if we got stopped after f's wait completed, just ignore it
+    handle (\StopWaiting -> return ()) $ unmask $ killThread wid
+    return r
 
 serve :: Net.SockAddr -> IO ()
 serve sa = do
@@ -118,8 +134,8 @@ serve sa = do
     logger $ "Acceped connect from " ++ show ca
     Net.setSocketOption c Net.NoDelay 1
     tid <- forkIOWithUnmask $ \unmask -> do
-      r <- try $ unmask $ client kvs c ca
       tid <- myThreadId
+      r <- try $ unmask $ client kvs c ca tid
       modifyMVar_ clients $ return . Set.delete tid
       unmask $ do
         logger $ "Closing connection from " ++ show ca ++ either (\e -> ": " ++ show (e :: SomeException)) (const "") r
