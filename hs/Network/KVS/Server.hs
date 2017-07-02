@@ -8,10 +8,15 @@ module Network.KVS.Server
   ( serve
   ) where
 
+import           Control.Arrow (first)
 import           Control.Concurrent (ThreadId, myThreadId, forkIOWithUnmask, throwTo, killThread, threadWaitRead)
 import           Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_, readMVar)
 import           Control.Exception (Exception(..), SomeException, AsyncException, asyncExceptionToException, asyncExceptionFromException, catch, handle, try, mask, mask_)
-import           Control.Monad (when, forever)
+import           Control.Monad (when, forever, guard)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import           Data.List (foldl')
+import           Data.Monoid ((<>))
 #ifdef VERSION_unordered_containers
 import           Data.Hashable (Hashable)
 import qualified Data.HashMap.Strict as Map
@@ -42,10 +47,10 @@ instance Ord ResourceLimit where
 
 #ifdef VERSION_unordered_containers
 type Map = Map.HashMap
-type Mappable a = (Eq a, Hashable a)
+type Set = Set.HashSet
 #else
 type Map = Map.Map
-type Mappable a = Ord a
+type Set = Set.Set
 #endif
 
 logger :: String -> IO ()
@@ -57,33 +62,109 @@ instance Exception StopWaiting where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
-type KVS = Map Key (MQueue EncodedValue)
+data EventMap a = EventMap
+  { eventGet, eventPut, eventView, eventWait :: a }
 
-lookupMQueue :: Mappable k => k -> Map k (MQueue a) -> IO (Map k (MQueue a), MQueue a)
-lookupMQueue k m = maybe
+instance Functor EventMap where
+  fmap f (EventMap g p v w) =
+    EventMap (f g) (f p) (f v) (f w)
+
+instance Applicative EventMap where
+  pure a = EventMap a a a a
+  EventMap fg fp fv fw <*> EventMap g p v w =
+    EventMap (fg g) (fp p) (fv v) (fw w)
+
+instance Monoid a => Monoid (EventMap a) where
+  mempty = pure mempty
+  mappend (EventMap g1 p1 v1 w1) (EventMap g2 p2 v2 w2) =
+    EventMap (mappend g1 g2) (mappend p1 p2) (mappend v1 v2) (mappend w1 w2)
+
+lookupEvent :: EventType -> EventMap a -> a
+lookupEvent EventGet = eventGet
+lookupEvent EventPut = eventPut
+lookupEvent EventView = eventView
+lookupEvent EventWait = eventWait
+
+insertEvent :: EventType -> a -> EventMap a -> EventMap a
+insertEvent EventGet v e = e{ eventGet = v }
+insertEvent EventPut v e = e{ eventPut = v }
+insertEvent EventView v e = e{ eventView = v }
+insertEvent EventWait v e = e{ eventWait = v }
+
+splitEvents :: BS.ByteString -> Maybe (Maybe BS.ByteString, [EventType])
+splitEvents s = do
+  c <- BSC.elemIndexEnd ':' s
+  let (k, e) = BS.splitAt c s
+  (k <$ guard (not $ BS.null k), ) <$> parseEvents (BSC.unpack e)
+
+type Monitors = EventMap (Set Key)
+
+data Entry = Entry
+  { _entryMQueue :: MQueue EncodedValue
+  , _entryMonitor :: Monitors
+  }
+
+data KVS = KVS
+  { _kvsMap :: Map Key Entry
+  , _kvsMonitor :: Monitors -- ^global monitors
+  }
+
+lookupEntry :: MVar KVS -> BS.ByteString -> IO Entry
+lookupEntry mkvs k = modifyMVar mkvs $ \kvs@(KVS m gmon) -> maybe
   (do
     q <- newMQueue
-    return (Map.insert k q m, q))
-  (return . (,) m)
+    let e = Entry q mempty
+    return (KVS (Map.insert k e m) gmon, Entry q gmon))
+  (\(Entry q emon) ->
+    return (kvs, Entry q (emon <> gmon)))
   $ Map.lookup k m
+
+setMonkey :: BS.ByteString -> (Maybe BS.ByteString, [EventType]) -> KVS -> IO KVS
+setMonkey mkey (key, events) (KVS m gmon) = maybe
+  (return $ KVS m (setev gmon))
+  (\k -> do
+    q <- newMQueue
+    let e = Entry q (setev mempty)
+    return $ KVS (Map.insertWith (\_ (Entry eq emon) -> Entry eq (setev emon)) k e m) gmon)
+  key
+  where
+  setev = (foldl' (\em e -> insertEvent e (Set.insert mkey) em) (pure $ Set.delete mkey) events <*>)
+
+doMonkeys :: MVar KVS -> (EventType, BS.ByteString) -> Monitors -> IO ()
+doMonkeys mkvs evk@(event, _) = do
+  mapM_ (\k -> do
+      Entry q _ <- lookupEntry mkvs k
+      putMQueue evkv q)
+    . lookupEvent event
+  where
+  evkv = (defaultEncoding, BSC.pack $ show $ first eventName evk)
 
 client :: MVar KVS -> Net.Socket -> Net.SockAddr -> ThreadId -> IO Bool
 client mkvs s _a tid = loop where
   loop = recvAll s 4 >>= cmd
   cmd "put_" = do
-    q <- getkeyq
+    key <- recvLenBS s
+    Entry q m <- lookupEntry mkvs key
     val <- recvEncodedValue s
     putMQueue val q
+    doMonkeys mkvs (EventPut, key) m
     loop
   cmd "get_" = do
-    q <- getkeyq
+    key <- recvLenBS s
+    Entry q m <- lookupEntry mkvs key
     val <- wait $ getMQueue q
     mapM_ (sendEncodedValue s) val
     loop
   cmd "view" = do
-    q <- getkeyq
+    key <- recvLenBS s
+    Entry q m <- lookupEntry mkvs key
     val <- wait $ viewMQueue q
     mapM_ (sendEncodedValue s) val
+    loop
+  cmd "mkey" = do
+    mkey <- recvLenBS s
+    val <- recvLenBS s
+    mapM_ (modifyMVar_ mkvs . setMonkey mkey) $ splitEvents val
     loop
   cmd "dump" = do
     fail "TODO"
@@ -94,7 +175,7 @@ client mkvs s _a tid = loop where
   cmd "down" =
     return True
   cmd c = fail $ "unknown op: " ++ show c
-  getkeyq = modifyMVar mkvs . lookupMQueue =<< recvLenBS s
+  getkeyq = lookupEntry mkvs =<< recvLenBS s
   wait f = mask $ \unmask -> do
     wid <- forkIOWithUnmask ($ do
       threadWaitRead $ Fd $ Net.fdSocket s
@@ -104,7 +185,7 @@ client mkvs s _a tid = loop where
     -- if we got stopped after f's wait completed, just ignore it
     handle (\StopWaiting -> return ()) $ unmask $ killThread wid
     return r
-
+    
 serve :: Net.SockAddr -> IO ()
 serve sa = do
 #ifdef VERSION_unix
@@ -115,7 +196,7 @@ serve sa = do
 #endif
 
   clients <- newMVar Set.empty
-  kvs <- newMVar Map.empty
+  kvs <- newMVar $ KVS Map.empty mempty
   
   s <- Net.socket (case sa of
     Net.SockAddrInet{} -> Net.AF_INET

@@ -94,7 +94,7 @@ view = getView "view"
 
 -- |Make key a monitor key, specifying what events to monitor and for which key.
 -- Whenever a listed event occurs for the second key, a put will be done to the first key with the value "<event> <key>".  If key is Nothing, the events listed will be monitored for all keys.  Monitoring of any event /not/ listed is turned off for the specified key.
-monkey :: KVSClient -> Key -> Maybe Key -> [Event] -> IO ()
+monkey :: KVSClient -> Key -> Maybe Key -> [EventType] -> IO ()
 monkey (KVSClient s) m k e = do
   NetBS.sendAll s "mkey"
   sendLenBS s m

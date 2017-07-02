@@ -7,7 +7,8 @@ module Network.KVS.Types
   , toEncoding
   , defaultEncoding
   , EncodedValue
-  , Event(..)
+  , EventType(..)
+  , eventName
   , eventChar
   , parseEvents
   ) where
@@ -44,25 +45,28 @@ defaultEncoding = "ASTR"
 
 type EncodedValue = (Encoding, Value)
 
-data Event
+data EventType
   = EventGet
   | EventPut
   | EventView
   | EventWait
   deriving (Eq, Ord, Bounded, Enum)
 
-eventChar :: Event -> Word8
-eventChar EventGet = c2w 'g'
-eventChar EventPut = c2w 'p'
-eventChar EventView = c2w 'v'
-eventChar EventWait = c2w 'w'
+eventName :: EventType -> BS.ByteString
+eventName EventGet = "get"
+eventName EventPut = "put"
+eventName EventView = "view"
+eventName EventWait = "wait"
 
-charEvent :: Char -> Maybe Event
+eventChar :: EventType -> Word8
+eventChar = BS.head . eventName
+
+charEvent :: Char -> Maybe EventType
 charEvent 'g' = Just EventGet
 charEvent 'p' = Just EventPut
 charEvent 'v' = Just EventView
 charEvent 'w' = Just EventWait
 charEvent _ = Nothing
 
-parseEvents :: String -> Maybe [Event]
+parseEvents :: String -> Maybe [EventType]
 parseEvents = mapM charEvent
