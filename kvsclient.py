@@ -231,7 +231,7 @@ if '__main__' == __name__:
     argp.add_argument('-P', '--pickle', dest='encoding', action='store_true', help='(Un-)Pickle values to/from python expressions')
     argp.add_argument('-A', '--no-pickle', dest='encoding', action='store_false', help="Don't (un-)pickle values (default)")
     argp.add_argument('-E', '--encoding', dest='encoding', type=str, metavar='CODE', help='Explicitly set/get encoding (4-character string, ignored on get) [ASTR or PYPK with -P]')
-    argp.add_argument('-T', '--timeout', type=float, metavar='SECS', help='Timeout waiting for get/view')
+    argp.add_argument('-T', '--timeout', type=float, metavar='SECS', nargs='?', help='Timeout waiting for get/view')
     argp.add_argument('-d', '--dump', action=OpAction, nargs=0, help='Dump the current state')
     argp.add_argument('-g', '--get', action=OpAction, nargs=1, metavar='KEY', help='Retrieve and remove a value')
     argp.add_argument('-v', '--view', action=OpAction, nargs=1, metavar='KEY', help='Retrieve a value')
@@ -244,13 +244,17 @@ if '__main__' == __name__:
 
     kvs = KVSClient(args.server, retry = args.retry)
 
-    for cmd in args.ops:
-        op = cmd.pop(0)
-        if op == 'sleep':
-            time.sleep(*cmd)
-        else:
-            try:
-                r = getattr(kvs, op)(*cmd)
-                if r is not None: print(r)
-            except Exception, e:
-                print >>sys.stderr, e
+    if hasattr(args, 'ops') and args.ops:
+        for cmd in args.ops:
+            op = cmd.pop(0)
+            if op == 'sleep':
+                time.sleep(*cmd)
+            else:
+                try:
+                    r = getattr(kvs, op)(*cmd)
+                    if r is not None: print(r)
+                except Exception, e:
+                    print >>sys.stderr, e
+    else:
+        print "Nothing to do."
+    kvs.close()
