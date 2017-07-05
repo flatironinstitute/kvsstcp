@@ -2,7 +2,6 @@
 import asyncore
 from collections import defaultdict as DD
 from cPickle import dumps as PDS
-from functools import partial
 import gc
 import logging
 import os
@@ -108,17 +107,20 @@ class KVSRequestHandler(KVSDispatcher):
             self.send(d)
             self.next_op()
         elif op in ['get_', 'mkey', 'put_', 'view']:
-            self.next_lendata(partial(self.handle_opkey, op))
+            self.next_lendata(lambda key:
+                    self.handle_opkey(op, key))
         else:
             raise Exception("Unknown op from %s: '%s'", repr(self.addr), op)
 
     def handle_opkey(self, op, key):
         #DEBUGOFF            logger.debug('(%s) %s key "%s"', whoAmI, reqtxt, key)
         if 'mkey' == op:
-            self.next_lendata(partial(self.handle_mkey, key))
+            self.next_lendata(lambda val:
+                    self.handle_mkey(key, val))
         elif 'put_' == op:
             self.next_read(4, lambda encoding:
-                self.next_lendata(partial(self.handle_put, key, encoding)))
+                    self.next_lendata(lambda val:
+                        self.handle_put(key, encoding, val)))
         else: # 'get_' or 'view'
             # Cancel waiting for any previous get/view operation (since client wouldn't be able to distinguish the async response)
             self.cancel_waiter()
