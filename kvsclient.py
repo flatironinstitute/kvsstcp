@@ -29,18 +29,16 @@ class KVSClient(object):
 
         self.addr = (host, int(port))
         self.socket = None
-        self.waiting = None
         self.connect(retry)
 
     # Low-level network operations
     def _close(self):
         if not self.socket: return
         try:
-            self.socket.close()
+            self._real_socket().close()
         except socket.error:
             pass
         self.socket = None
-        self.waiting = None
 
     def _recvValue(self, doPickle=False):
         l = int(recvall(self.socket, AsciiLenChars))
@@ -53,36 +51,58 @@ class KVSClient(object):
         self.socket.sendall(AsciiLenFormat%len(payload))
         self.socket.sendall(payload)
 
-    def _check_wait(self, wait=None):
-        '''Make sure there's no outstanding get/view call that must be retried,
-        or at least that it matches the current operation.'''
-        if self.waiting and self.waiting != wait:
-            # We could implement an explicit "cancel wait" call with a response to let this be canceled explicitly
-            raise Exception("Previous %s timed out: you must retreive the previously requested %s value first." % self.waiting)
+    class SocketWaiting:
+        '''Used as placeholder socket when there's an incomplete get/view call
+        that must be retried.  The real socket and outstanding op are stashed.'''
+        def __init__(self, socket, op):
+            self.socket = socket
+            self.op = op
+
+        def __nonzero__(self):
+            return True
+
+        def __getattr__(self, attr):
+            '''Disallow any other operations on a waiting socket.'''
+            raise Exception("Previous %s timed out: you must retreive the previously requested '%s' value first." % self.op)
+
+    def _real_socket(self):
+        '''Get the real socket, even if we have an outstanding SocketWaiting.'''
+        try:
+            # for SocketWaiting
+            return self.socket.socket
+        except AttributeError:
+            return self.socket
 
     def _get_view(self, op, k, encoding, timeout=None):
-        self._check_wait((op, k))
-        if not self.waiting:
+        try:
+            # check if we're waiting for something
+            waiting = self.socket.op
+        except AttributeError:
+            waiting = None
+        if waiting == (op, k):
+            # continue previous timedout wait
+            self.socket = self.socket.socket
+        else:
+            # new wait
             self.socket.sendall(op)
             self._sendLenAndBytes(k)
-            self.waiting = (op, k)
         if timeout is None:
-            self.waiting = None
             coding = recvall(self.socket, 4)
         else:
             self.socket.settimeout(timeout)
             try:
                 c = self.socket.recv(1)
             except socket.timeout:
+                self.socket = self.SocketWaiting(self.socket, (op, k))
                 return
             except socket.error, e:
                 if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    self.socket = self.SocketWaiting(self.socket, (op, k))
                     return
                 else:
                     raise
             finally:
-                self.socket.settimeout(None)
-            self.waiting = None
+                self._real_socket().settimeout(None)
             if not c:
                 raise socket.error("Connection closed")
             coding = c + recvall(self.socket, 3)
@@ -110,7 +130,6 @@ class KVSClient(object):
 
     def close(self):
         '''Close the connection to the KVS storage server. Does a socket shutdown as well.'''
-        self._check_wait()
         if not self.socket: return
         try:
             self.socket.sendall('clos')
@@ -122,7 +141,6 @@ class KVSClient(object):
 
     def dump(self):
         '''Returns a snapshot of the KV store and its statistics.'''
-        self._check_wait()
         self.socket.sendall('dump')
         return self._recvValue(True)
 
@@ -159,7 +177,6 @@ class KVSClient(object):
         encode as PYPK.  If False, convert to string and store as ASTR.
         Otherwise, encoding must be a 4 character string, and value must be a
         string.'''
-        self._check_wait()
         if encoding is True:
             value = PDS(value)
             encoding = 'PYPK'
@@ -189,7 +206,6 @@ class KVSClient(object):
         wait). Monitoring of any event *not* listed is turned off for
         the specified key.
         '''
-        self._check_wait()
         self.socket.sendall('mkey')
         self._sendLenAndBytes(mkey)
         self._sendLenAndBytes(value)
@@ -197,9 +213,9 @@ class KVSClient(object):
     def shutdown(self):
         '''Tell the KVS server to shutdown (and run the close() method for this client).'''
         try:
-            self.socket.sendall('down')
+            self._real_socket().sendall('down')
         finally:
-            self.close()
+            self._close()
 
 def addKVSServerArgument(argp, name = 'kvsserver'):
     '''Add an argument to the given ArgumentParser that accepts the address of a running KVSServer, defaulting to $KVSSTCP_HOST:$KVSSTCP_PORT.'''
