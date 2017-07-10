@@ -312,6 +312,12 @@ class KVSServer(Thread, asyncore.dispatcher):
     def run(self):
         asyncore.loop(None, True)
 
+    def env(self, env = os.environ.copy()):
+        '''Add the KVSSTCP environment variables to the given environment.'''
+        env['KVSSTCP_HOST'] = self.cinfo[0]
+        env['KVSSTCP_PORT'] = str(self.cinfo[1])
+        return env
+
 if '__main__' == __name__:
     import argparse
     argp = argparse.ArgumentParser(description='Start key-value storage server.')
@@ -339,10 +345,7 @@ if '__main__' == __name__:
     try:
         if args.execcmd:
             import subprocess
-            env = os.environ.copy()
-            env['KVSSTCP_HOST'] = t.cinfo[0]
-            env['KVSSTCP_PORT'] = str(t.cinfo[1])
-            subprocess.call(args.execcmd, shell=True, env=env)
+            subprocess.call(args.execcmd, shell=True, env=t.env())
         else:
             while t.isAlive():
                 t.join(60)
