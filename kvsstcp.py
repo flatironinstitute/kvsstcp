@@ -92,7 +92,7 @@ class KVSRequestHandler(KVSDispatcher):
         # wait for variable-length data prefixed by AsciiLenFormat
         def handle_len(l):
             n = int(l)
-            if n <= 0: raise Exception("invalid data len: '%s'" % l)
+            if n < 0: raise Exception("invalid data len: '%s'" % l)
             self.next_read(n, handler)
         self.next_read(AsciiLenChars, handle_len)
 
