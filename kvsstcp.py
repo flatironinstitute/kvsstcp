@@ -50,6 +50,8 @@ class KVSDispatcher(asyncore.dispatcher):
     def next_read(self, size, f):
         self.in_size = size
         self.in_handler = f
+        if size <= len(self.in_buf):
+            self.handle_read()
 
     def handle_read(self):
         z = self.in_size

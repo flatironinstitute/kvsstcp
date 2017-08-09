@@ -40,6 +40,7 @@ AsciiLenFormat = '%%%dd'%AsciiLenChars
 
 if hasattr(socket, "MSG_WAITALL"):
     def recvall(s, n):
+        if not n: return ''
         r = s.recv(n, socket.MSG_WAITALL)
         if len(r) < n: raise socket.error('Connection dropped')
         return r
