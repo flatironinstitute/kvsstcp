@@ -24,12 +24,20 @@ class KVSClient(object):
         if not host: raise Exception('Missing host')
 
         if not port:
-            if host.count(':') != 1: raise Exception('Missing port')
-            host, port = host.split(':')
+            if type(host) is tuple:
+                host, port = host
+            elif ':' in host:
+                host, port = host.rsplit(':', 1)
+            else:
+                raise Exception('Missing port')
 
         self.addr = (host, int(port))
         self.socket = None
         self.connect(retry)
+
+    def clone(self):
+        '''Create a new connection to the same server as this one.'''
+        return KVSClient(self.addr)
 
     # Low-level network operations
     def _close(self):
