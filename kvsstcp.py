@@ -220,7 +220,10 @@ class KVS(object):
     def cancel_wait(self, waiter):
         ww = self.waiters.get(waiter.key)
         if ww:
-            ww.remove(waiter)
+            try:
+                ww.remove(waiter)
+            except ValueError:
+                pass
             if not ww: self.waiters.pop(waiter.key)
 
     def monkey(self, mkey, v):
