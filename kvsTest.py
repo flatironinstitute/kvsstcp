@@ -1,9 +1,10 @@
+#!/usr/bin/env python
 import os, sys
 from kvsclient import KVSClient
 
 # Connect to the key value store service (its location is the first
 # argument).
-kvs = KVSClient(sys.argv[1])
+kvs = KVSClient(sys.argv[1] if len(sys.argv) > 1 else None)
 
 # Find out which process we are (assumes running under SLURM).
 rank = int(os.environ['SLURM_PROCID'])
