@@ -285,10 +285,9 @@ class KVSServer(Thread, asyncore.dispatcher):
         self.kvs = KVS()
 
         snof, hnof = resource.getrlimit(resource.RLIMIT_NOFILE)
-        wantnof = min(hnof, 4096)
-        if snof < wantnof:
-            logger.info('Raising queue size from %d to %d', snof, wantnof)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (wantnof, hnof))
+        if snof < hnof:
+            logger.info('Raising max open files from %d to %d', snof, hnof)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hnof, hnof))
 
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.set_reuse_addr()
