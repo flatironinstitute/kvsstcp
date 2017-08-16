@@ -6,5 +6,5 @@
 prog=$1
 date
 echo "Running $prog on $(hostname) (${SLURM_NTASKS})"
-/mnt/xfs1/home/carriero/projects/python/skvs/wip/kvsstcp.py -a kvss_addr_${SLURM_JOB_ID}.txt --logfile kvss_${SLURM_JOB_ID}.log --execcmd 'srun -e %j_%t_err.txt -o %j_%t_out.txt '"$*"
+./kvsstcp.py -a kvss_addr_${SLURM_JOB_ID}.txt --logfile kvss_${SLURM_JOB_ID}.log --execcmd 'srun -e %j_%t_err.txt -o %j_%t_out.txt '"$*"
 date
