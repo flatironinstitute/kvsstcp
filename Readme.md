@@ -26,3 +26,19 @@ The reference python implementation should work with any stock python 2.7 or abo
 `wskvsmu.py` is a prototype web interface for displaying the state of a KVS server (and injecting values into it). Uses `wskvspage.html` as the frontend.
 
 "kvsTestWIc.c" and "kvsTestWIf.f" provide example codes that use KVS via wskvsmu.py to enter input from a web browser into C or FORTRAN. 
+
+## License
+
+Copyright 2017 Simons Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
