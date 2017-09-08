@@ -277,7 +277,7 @@ class KVS(object):
         self._doMonkeys('put', k)
 
 class KVSServer(Thread, asyncore.dispatcher):
-    def __init__(self, host, port):
+    def __init__(self, host=None, port=0):
         if not host: host = socket.gethostname()
 
         Thread.__init__(self, name='KVSServerThread')
