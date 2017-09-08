@@ -1,81 +1,177 @@
 #!/usr/bin/env python
-import asyncore
 from collections import defaultdict as DD
 from cPickle import dumps as PDS
 from functools import partial
+import errno
 import gc
 import logging
 import os
 import resource
+import select
 import socket
 import sys
 from threading import Thread
 
 from kvscommon import *
 
-logger = logging.getLogger('Key value store')
+logger = logging.getLogger('kvs')
 #logger.config.dictConfig({'format': '%(asctime)s - %(levelname)s: %(message)s', 'filename': 'toodle', 'level': logging.DEBUG3})
 
 # There are some cyclic references in in asyncio, handlers, waiters, etc., so I'm re-enabling this:
 #gc.disable()
 
-# Adds buffered output and input of known-size blocks (like dispatcher_with_send)
-class KVSDispatcher(asyncore.dispatcher):
-    def __init__(self, sock=None, map=None):
-        asyncore.dispatcher.__init__(self, sock, map)
+_DISCONNECTED = frozenset((errno.ECONNRESET, errno.ENOTCONN, errno.ESHUTDOWN, errno.ECONNABORTED, errno.EPIPE, errno.EBADF))
+_BUFSIZ = 8192
+
+class HandlerThread(Thread):
+    '''Based on asyncore, but with a simpler, stricter per-thread interface that allows better performance.'''
+    def __init__(self):
+        super(HandlerThread, self).__init__(name='HandlerThread')
+        self.epoll = select.epoll()
+        self.disps = dict()
+        self.daemon = True
+        self.current = None
+        self.start()
+
+    def register(self, dispatcher):
+        self.disps[dispatcher.fd] = dispatcher
+        self.epoll.register(dispatcher.fd, dispatcher.mask)
+
+    def unregister(self, dispatcher):
+        self.epoll.unregister(dispatcher.fd)
+        del self.disps[dispatcher.fd]
+
+    def modify(self, dispatcher):
+        self.epoll.modify(dispatcher.fd, dispatcher.mask)
+
+    def poll(self):
+        ev = self.epoll.poll()
+        for (f, e) in ev:
+            d = self.current = self.disps[f]
+            oldm = d.mask
+            if e & select.EPOLLHUP:
+                d.handle_close()
+                continue
+            if e & select.EPOLLIN:
+                d.handle_read()
+                if d.mask & select.EPOLLHUP: continue
+            if d.mask & select.EPOLLOUT:
+                d.handle_write()
+                if d.mask & select.EPOLLHUP: continue
+            self.current = None
+            m = d.mask
+            if m != oldm:
+                self.epoll.modify(f, m)
+
+    def run(self):
+        while True:
+            self.poll()
+
+    def close(self):
+        self.epoll.close()
+
+class Dispatcher(object):
+    '''Based on asyncore.dispatcher_with_send, works with EventHandler.
+    Also allows input of known-size blocks.'''
+    def __init__(self, sock, handler):
         self.out_buf = []
         self.in_buf = ''
-        self.in_size = 0
-        self.in_handler = None
+        self.read_size = 0
+        self.read_handler = None
+        self.sock = sock
+        self.fd = sock.fileno()
+        self.mask = 0
+        sock.setblocking(0)
+        self.handler = handler
 
-    def writable(self):
-        return (not self.connected) or len(self.out_buf)
+    def open(self):
+        self.handler.register(self)
 
-    def readable(self):
-        return (not self.connected) or self.in_handler
+    def _send(self, data):
+        try:
+            return self.sock.send(data)
+        except socket.error, e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return 0
+            if e.errno in _DISCONNECTED:
+                self.handle_close()
+                return 0
+            raise
 
-    def send(self, data):
+    def _recv(self, siz):
+        try:
+            data = self.sock.recv(siz)
+            if not data:
+                self.handle_close()
+            return data
+        except socket.error, e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return ''
+            if e.errno in _DISCONNECTED:
+                self.handle_close()
+                return ''
+            raise
+
+    def close(self):
+        self.mask |= select.EPOLLHUP
+        self.handler.unregister(self)
+
+    def handle_close(self):
+        self.close()
+
+    def write(self, data):
         self.out_buf.append(data)
-        self.handle_write()
+        if not self.mask & select.EPOLLOUT:
+            self.mask |= select.EPOLLOUT
+            # write can be called from other threads
+            if self.handler.current is not self:
+                self.handler.modify(self)
 
     def handle_write(self):
         while self.out_buf:
             buf = self.out_buf[0]
-            r = asyncore.dispatcher.send(self, buf)
+            r = self._send(buf)
             if r < len(buf):
                 if r: self.out_buf[0] = buf[r:]
                 return
             self.out_buf.pop(0)
+        self.mask &= ~select.EPOLLOUT
+
+    def got_read(self, z):
+        i = self.in_buf[:z]
+        handler = self.read_handler
+        self.in_buf = self.in_buf[z:]
+        self.read_handler = None
+        self.mask &= ~select.EPOLLIN
+        handler(i)
 
     def next_read(self, size, f):
-        self.in_size = size
-        self.in_handler = f
+        self.read_size = size
+        self.read_handler = f
+        self.mask |= select.EPOLLIN
         if size <= len(self.in_buf):
-            self.handle_read()
+            self.got_read(size)
 
     def handle_read(self):
-        z = self.in_size
+        z = self.read_size
         n = len(self.in_buf)
         if n < z:
-             self.in_buf += self.recv(z - n)
-             n = len(self.in_buf)
+            self.in_buf += self._recv(max(_BUFSIZ, z-n))
+            n = len(self.in_buf)
         if n >= z:
-            i = self.in_buf[:z]
-            handler = self.in_handler
-            self.in_buf = self.in_buf[z:]
-            self.in_handler = None
-            handler(i)
+            self.got_read(z)
 
-class KVSRequestHandler(KVSDispatcher):
-    def __init__(self, pair, server):
-        sock, addr = pair
+class KVSRequestHandler(Dispatcher):
+    def __init__(self, pair, server, handler):
+        sock, self.addr = pair
         self.server = server
         # Keep track of any currently waiting get:
         self.waiter = None
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        KVSDispatcher.__init__(self, sock)
-        logger.info('Accepted connect from %s', repr(addr))
+        super(KVSRequestHandler, self).__init__(sock, handler)
+        logger.info('Accepted connect from %s', repr(self.addr))
         self.next_op()
+        self.open()
 
     def handle_close(self):
         self.cancel_waiter()
@@ -100,14 +196,14 @@ class KVSRequestHandler(KVSDispatcher):
 
     def handle_op(self, op):
         if 'clos' == op:
-            self.socket.shutdown(socket.SHUT_RDWR)
+            self.sock.shutdown(socket.SHUT_RDWR)
         elif 'down' == op:
             logger.info('Calling server shutdown')
             self.server.shutdown()
         elif 'dump' == op:
             d = self.server.kvs.dump()
-            self.send(AsciiLenFormat%(len(d)))
-            self.send(d)
+            self.write(AsciiLenFormat%(len(d)))
+            self.write(d)
             self.next_op()
         elif op in ['get_', 'mkey', 'put_', 'view']:
             self.next_lendata(partial(self.handle_opkey, op))
@@ -142,9 +238,9 @@ class KVSRequestHandler(KVSDispatcher):
 
     def handle_got(self, encval):
         (encoding, val) = encval
-        self.send(encoding)
-        self.send(AsciiLenFormat%(len(val)))
-        self.send(val)
+        self.write(encoding)
+        self.write(AsciiLenFormat%(len(val)))
+        self.write(val)
         self.waiter = None
 
 class KVSWaiter:
@@ -276,12 +372,11 @@ class KVS(object):
         if not consumed: self.store[k].append(v)
         self._doMonkeys('put', k)
 
-class KVSServer(Thread, asyncore.dispatcher):
+class KVSServer(Thread):
     def __init__(self, host=None, port=0):
+        super(KVSServer, self).__init__(name='KVSServerThread')
         if not host: host = socket.gethostname()
 
-        Thread.__init__(self, name='KVSServerThread')
-        asyncore.dispatcher.__init__(self)
         self.kvs = KVS()
 
         snof, hnof = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -289,32 +384,32 @@ class KVSServer(Thread, asyncore.dispatcher):
             logger.info('Raising max open files from %d to %d', snof, hnof)
             resource.setrlimit(resource.RLIMIT_NOFILE, (hnof, hnof))
 
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.set_reuse_addr()
-        self.bind((host, port))
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setblocking(1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((host, port))
         logger.info('Setting queue size to 4000')
-        self.listen(4000)
-        self.cinfo = self.socket.getsockname()
+        self.sock.listen(4000)
+        self.cinfo = self.sock.getsockname()
 
-        self.running = True
+        self.handler = HandlerThread()
+
         self.start()
 
-    def handle_accept(self):
-        pair = self.accept()
-        if pair is not None:
-            KVSRequestHandler(pair, self)
-
-    def handle_close(self):
-        logger.info('Server shutting down')
-        self.running = False
-        asyncore.close_all(ignore_all = True)
-
     def shutdown(self):
-        if self.running:
-            self.socket.shutdown(socket.SHUT_RDWR)
+        self.sock.shutdown(socket.SHUT_RDWR)
 
     def run(self):
-        asyncore.loop(None, True)
+        while True:
+            try:
+                pair = self.sock.accept()
+            except socket.error, e:
+                if e.errno in _DISCONNECTED or e.errno == errno.EINVAL:
+                    break
+                raise
+            KVSRequestHandler(pair, self, self.handler)
+        logger.info('Server shutting down')
+        self.handler.close()
 
     def env(self, env = os.environ.copy()):
         '''Add the KVSSTCP environment variables to the given environment.'''
@@ -334,7 +429,7 @@ if '__main__' == __name__:
 
     # TODO: figure out where this should really go.
     lconf = {'format': '%(asctime)s %(levelname)-8s %(name)-15s: %(message)s', 'level': logging.DEBUG}
-    if args.logfile: 
+    if args.logfile:
         args.logfile.close()
         lconf['filename'] = args.logfile.name
     logging.basicConfig(**lconf)
@@ -349,7 +444,7 @@ if '__main__' == __name__:
     try:
         if args.execcmd:
             import subprocess
-            subprocess.call(args.execcmd, shell=True, env=t.env())
+            subprocess.check_call(args.execcmd, shell=True, env=t.env())
         else:
             while t.isAlive():
                 t.join(60)
