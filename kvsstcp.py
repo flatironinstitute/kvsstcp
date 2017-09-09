@@ -15,7 +15,6 @@ from threading import Thread
 from kvscommon import *
 
 logger = logging.getLogger('kvs')
-#logger.config.dictConfig({'format': '%(asctime)s - %(levelname)s: %(message)s', 'filename': 'toodle', 'level': logging.DEBUG3})
 
 # There are some cyclic references in in asyncio, handlers, waiters, etc., so I'm re-enabling this:
 #gc.disable()
@@ -119,8 +118,8 @@ class Dispatcher(object):
     def handle_close(self):
         self.close()
 
-    def write(self, data):
-        self.out_buf.append(data)
+    def write(self, *data):
+        self.out_buf.extend(data)
         if not self.mask & select.EPOLLOUT:
             self.mask |= select.EPOLLOUT
             # write can be called from other threads
@@ -202,8 +201,7 @@ class KVSRequestHandler(Dispatcher):
             self.server.shutdown()
         elif 'dump' == op:
             d = self.server.kvs.dump()
-            self.write(AsciiLenFormat%(len(d)))
-            self.write(d)
+            self.write(AsciiLenFormat%(len(d)), d)
             self.next_op()
         elif op in ['get_', 'mkey', 'put_', 'view']:
             self.next_lendata(partial(self.handle_opkey, op))
@@ -238,9 +236,7 @@ class KVSRequestHandler(Dispatcher):
 
     def handle_got(self, encval):
         (encoding, val) = encval
-        self.write(encoding)
-        self.write(AsciiLenFormat%(len(val)))
-        self.write(val)
+        self.write(encoding, AsciiLenFormat%(len(val)), val)
         self.waiter = None
 
 class KVSWaiter:
@@ -276,8 +272,9 @@ class KVS(object):
         # Don't monitor operations on monitor keys.
         if k in self.monkeys: return
         #DEBUGOFF        logger.debug('doMonkeys: %s %s %s', op, k, repr(self.key2mon[True][op] | self.key2mon[k][op]))
-        for mk in self.key2mon[True][op] | self.key2mon[k][op]:
-            self.put(mk, ('ASTR', repr((op, k))))
+        for p in (True, k):
+            for mk in self.key2mon[p][op]:
+                self.put(mk, ('ASTR', repr((op, k))))
         
     def dump(self):
         '''Utility function that returns a snapshot of the KV store.'''
