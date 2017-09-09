@@ -394,7 +394,8 @@ class KVSServer(Thread):
         self.start()
 
     def shutdown(self):
-        self.sock.shutdown(socket.SHUT_RDWR)
+        if self.sock:
+            self.sock.shutdown(socket.SHUT_RDWR)
 
     def run(self):
         while True:
@@ -406,6 +407,8 @@ class KVSServer(Thread):
                 raise
             KVSRequestHandler(pair, self, self.handler)
         logger.info('Server shutting down')
+        self.sock.close()
+        self.sock = None
         self.handler.close()
 
     def env(self, env = os.environ.copy()):
