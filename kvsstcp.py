@@ -15,7 +15,10 @@ import socket
 import sys
 from threading import Thread
 
-from kvscommon import *
+try:
+    from .kvscommon import *
+except:
+    from kvscommon import *
 
 logger = logging.getLogger('kvs')
 

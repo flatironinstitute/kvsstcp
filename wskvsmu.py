@@ -4,8 +4,12 @@ import argparse, base64, hashlib, json, os, SimpleHTTPServer, socket, SocketServ
 from threading import current_thread, Lock, Thread
 import pkg_resources
 
-import kvsclient
-from kvscommon import recvall
+try:
+    import .kvsclient
+    from .kvscommon import recvall
+except:
+    import kvsclient
+    from kvscommon import recvall
 
 # The web monitor implements two conventions wrt keys:
 #

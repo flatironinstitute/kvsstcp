@@ -10,7 +10,10 @@ try:
 except ImportError:
     from pickle import dumps as PDS, loads as PLS
 
-from kvscommon import *
+try:
+    from .kvscommon import *
+except:
+    from kvscommon import *
 
 class KVSClient(object):
     '''KVS convenience wrapper that includes pickling by default.'''
