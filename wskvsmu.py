@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 import argparse, base64, hashlib, json, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
 from threading import current_thread, Lock, Thread
 import pkg_resources
