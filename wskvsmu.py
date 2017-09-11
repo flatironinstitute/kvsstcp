@@ -1,4 +1,5 @@
 #!/usr/bin/env python2
+from __future__ import print_function
 import argparse, base64, hashlib, json, os, SimpleHTTPServer, socket, SocketServer, struct as S, sys
 from threading import current_thread, Lock, Thread
 import pkg_resources
@@ -103,7 +104,7 @@ class WebSocketServer(object):
                 else:
                     self.client.sendall(S.pack('!BBQ', 0x80 | op, 127, lp))
                 self.client.sendall(p)
-        except socket.error, msg:
+        except socket.error as msg:
             self.active = False
 
     def recv(self):
@@ -115,11 +116,11 @@ class WebSocketServer(object):
             assert b & 0x80
             return 'bye'
         elif op == 0x9:
-            print >> sys.stderr, 'Got a ping'
+            print('Got a ping', file=sys.stderr)
             #TODO: Do something here
             return ''
         elif op == 0XA:
-            print >> sys.stderr, 'Got a pong'
+            print('Got a pong', file=sys.stderr)
             #TODO: Do something here?
             return ''
         elif op == 0x1:
@@ -134,7 +135,7 @@ class WebSocketServer(object):
             for i in xrange(plen): decode += chr(ord(p[i]) ^ mb[i%4])
             return decode
         else:
-            print >>sys.stderr, 'ws recv header byte: %02x'%b
+            print('ws recv header byte: %02x'%b, file=sys.stderr)
             return ''
 
     def close(self):
@@ -208,7 +209,7 @@ class FrontEndThread(Thread):
         self.httpd.base_url = 'http://%s:%s'%(self.httpd.server_address)
 
         myurl = self.httpd.base_url + '/kvsviewer'
-        print >>sys.stderr, 'front end at: '+myurl
+        print('front end at: '+myurl, file=sys.stderr)
         if urlfile:
             urlfile.write('%s\n'%(myurl))
             urlfile.close()

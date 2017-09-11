@@ -1,10 +1,14 @@
 #!/usr/bin/env python2
+from __future__ import print_function
 import errno
 import os
 import socket
 import sys
 import time
-from cPickle import dumps as PDS, loads as PLS
+try:
+    from cPickle import dumps as PDS, loads as PLS
+except ImportError:
+    from pickle import dumps as PDS, loads as PLS
 
 from kvscommon import *
 
@@ -103,7 +107,7 @@ class KVSClient(object):
             except socket.timeout:
                 self.socket = self.SocketWaiting(self.socket, (op, k))
                 return
-            except socket.error, e:
+            except socket.error as e:
                 if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                     self.socket = self.SocketWaiting(self.socket, (op, k))
                     return
@@ -128,10 +132,10 @@ class KVSClient(object):
                 self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self.socket.connect(self.addr)
                 return
-            except socket.error, msg:
+            except socket.error as msg:
                 self._close()
                 if rep >= retry: raise
-                print >>sys.stderr, 'kvs socket error: %s, retrying' % msg
+                print('kvs socket error: %s, retrying' % msg, file=sys.stderr)
             # exponential backoff
             time.sleep(2 ** rep)
             rep += 1
@@ -142,9 +146,9 @@ class KVSClient(object):
         try:
             self.socket.sendall('clos')
             self.socket.shutdown(socket.SHUT_RDWR)
-        except socket.error, e:
+        except socket.error as e:
             # this is the client --- cannot assume logging is available.
-            print >>sys.stderr, 'Ignoring exception during client close: "%s"'%e
+            print('Ignoring exception during client close: "%s"'%e, file=sys.stderr)
         self._close()
 
     def dump(self):
@@ -277,8 +281,8 @@ if '__main__' == __name__:
                 try:
                     r = getattr(kvs, op)(*cmd)
                     if r is not None: print(r)
-                except Exception, e:
-                    print >>sys.stderr, e
+                except Exception as e:
+                    print(e, file=sys.stderr)
     else:
-        print "Nothing to do."
+        print("Nothing to do.")
     kvs.close()

@@ -44,6 +44,7 @@ if 0 == rank:
     s, workers = 0, int(os.environ['SLURM_NTASKS'])
     for p in xrange(workers):
         wrank, ps = kvs.get('psum')
-        print 'rank %d: %d'%(wrank, ps)
+        print('rank %d: %d'%(wrank, ps))
         s += ps
-    print 'total', s, (limit*limit) == s
+    print('total = %d (%r)' % (s, (limit*limit) == s))
+    sys.exit((limit*limit) != s)

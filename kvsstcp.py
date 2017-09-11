@@ -64,7 +64,12 @@ class HandlerThread(Thread):
 
     def run(self):
         while True:
-            self.poll()
+            try:
+                self.poll()
+            except IOError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                raise
 
     def close(self):
         self.epoll.close()
@@ -89,7 +94,7 @@ class Dispatcher(object):
     def _send(self, data):
         try:
             return self.sock.send(data)
-        except socket.error, e:
+        except socket.error as e:
             if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 return 0
             if e.errno in _DISCONNECTED:
@@ -103,7 +108,7 @@ class Dispatcher(object):
             if not data:
                 self.handle_close()
             return data
-        except socket.error, e:
+        except socket.error as e:
             if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 return ''
             if e.errno in _DISCONNECTED:
@@ -401,7 +406,7 @@ class KVSServer(Thread):
         while True:
             try:
                 pair = self.sock.accept()
-            except socket.error, e:
+            except socket.error as e:
                 if e.errno in _DISCONNECTED or e.errno == errno.EINVAL:
                     break
                 raise
