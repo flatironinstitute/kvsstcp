@@ -74,6 +74,9 @@ class KVSClient(object):
         def __nonzero__(self):
             return True
 
+        def __bool__(self):
+            return True
+
         def __getattr__(self, attr):
             '''Disallow any other operations on a waiting socket.'''
             raise Exception("Previous %s timed out: you must retreive the previously requested '%s' value first." % self.op)

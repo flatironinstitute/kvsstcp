@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 from collections import defaultdict as DD
 try:
     from cPickle import dumps as PDS
@@ -294,7 +294,7 @@ class KVS(object):
             if len(v[1]) > 50: return (v[0], v[1][:24] + '...' + v[1][-23:], len(v[1]))
             return v
 
-        return PDS(([self.opCounts[b'get'], self.opCounts[b'put'], self.opCounts[b'view'], self.opCounts[b'wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.iteritems() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.iteritems() if vv]))
+        return PDS(([self.opCounts[b'get'], self.opCounts[b'put'], self.opCounts[b'view'], self.opCounts[b'wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.items() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.items() if vv]))
 
     def wait(self, waiter):
         '''Atomically (remove and) return a value associated with key k. If
