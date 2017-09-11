@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 from __future__ import print_function
 import errno
 import os
@@ -59,8 +59,9 @@ class KVSClient(object):
         return payload
 
     def _sendLenAndBytes(self, payload):
-        # if not doPickle, this seems very likely to be wrong for anything but bytearrays (encoding, etc.)
-        self.socket.sendall(AsciiLenFormat%len(payload))
+        if type(payload) is not bytes:
+            payload = bytes(payload, 'utf-8')
+        self.socket.sendall(AsciiLenFormat(len(payload)))
         self.socket.sendall(payload)
 
     class SocketWaiting:
@@ -118,7 +119,7 @@ class KVSClient(object):
             if not c:
                 raise socket.error("Connection closed")
             coding = c + recvall(self.socket, 3)
-        v = self._recvValue(encoding is True and coding == 'PYPK')
+        v = self._recvValue(encoding is True and coding == b'PYPK')
         return v if type(encoding) == bool else (coding, v)
 
 
@@ -144,7 +145,7 @@ class KVSClient(object):
         '''Close the connection to the KVS storage server. Does a socket shutdown as well.'''
         if not self.socket: return
         try:
-            self.socket.sendall('clos')
+            self.socket.sendall(b'clos')
             self.socket.shutdown(socket.SHUT_RDWR)
         except socket.error as e:
             # this is the client --- cannot assume logging is available.
@@ -153,7 +154,7 @@ class KVSClient(object):
 
     def dump(self):
         '''Returns a snapshot of the KV store and its statistics.'''
-        self.socket.sendall('dump')
+        self.socket.sendall(b'dump')
         return self._recvValue(True)
 
     def get(self, key, encoding=True):
@@ -165,7 +166,7 @@ class KVSClient(object):
         unpickled before being returned.  If encoding is False, just return the
         raw value.  For anything else, return (encoding, value).
         '''
-        return self._get_view('get_', key, encoding)
+        return self._get_view(b'get_', key, encoding)
 
     def _get_nb(self, key, encoding=True, timeout=None):
         '''Non-blocking get.
@@ -174,15 +175,15 @@ class KVSClient(object):
         returning None.  In this case, you MUST call this function again in the
         future until it returns a value before doing any other operation,
         otherwise the value may be lost.'''
-        return self._get_view('get_', key, encoding, timeout)
+        return self._get_view(b'get_', key, encoding, timeout)
 
     def view(self, key, encoding=True):
         '''Retrieve, but do not remove, a value from the store.  See 'get'.'''
-        return self._get_view('view', key, encoding)
+        return self._get_view(b'view', key, encoding)
 
     def _view_nb(self, key, encoding=True, timeout=None):
         '''Non-blocking view.  See '_get_nb' and 'view'.'''
-        return self._get_view('view', key, encoding, timeout)
+        return self._get_view(b'view', key, encoding, timeout)
 
     def put(self, key, value, encoding=True):
         '''Add a value to the key.  If encoding is True, pickle the value and
@@ -191,16 +192,16 @@ class KVSClient(object):
         string.'''
         if encoding is True:
             value = PDS(value)
-            encoding = 'PYPK'
+            encoding = b'PYPK'
         elif encoding is False:
             # TODO: Is this silent stringification two clever by half?
             # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
             if type(value) != str: value = repr(v)
-            encoding = 'ASTR'
+            encoding = b'ASTR'
         elif type(encoding) != str or len(encoding) != 4:
             raise TypeError('Invalid encoding: %s'%encoding)
 
-        self.socket.sendall('put_')
+        self.socket.sendall(b'put_')
         self._sendLenAndBytes(key)
         self.socket.sendall(encoding)
         self._sendLenAndBytes(value)
@@ -218,14 +219,14 @@ class KVSClient(object):
         wait). Monitoring of any event *not* listed is turned off for
         the specified key.
         '''
-        self.socket.sendall('mkey')
+        self.socket.sendall(b'mkey')
         self._sendLenAndBytes(mkey)
         self._sendLenAndBytes(value)
 
     def shutdown(self):
         '''Tell the KVS server to shutdown (and run the close() method for this client).'''
         try:
-            self._real_socket().sendall('down')
+            self._real_socket().sendall(b'down')
         finally:
             self._close()
 

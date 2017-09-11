@@ -1,6 +1,9 @@
 #!/usr/bin/env python2
 from collections import defaultdict as DD
-from cPickle import dumps as PDS
+try:
+    from cPickle import dumps as PDS
+except ImportError:
+    from pickle import dumps as PDS
 from functools import partial
 import errno
 import gc
@@ -79,7 +82,7 @@ class Dispatcher(object):
     Also allows input of known-size blocks.'''
     def __init__(self, sock, handler):
         self.out_buf = []
-        self.in_buf = ''
+        self.in_buf = b''
         self.read_size = 0
         self.read_handler = None
         self.sock = sock
@@ -110,10 +113,10 @@ class Dispatcher(object):
             return data
         except socket.error as e:
             if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-                return ''
+                return b''
             if e.errno in _DISCONNECTED:
                 self.handle_close()
-                return ''
+                return b''
             raise
 
     def close(self):
@@ -199,25 +202,25 @@ class KVSRequestHandler(Dispatcher):
         self.next_read(AsciiLenChars, handle_len)
 
     def handle_op(self, op):
-        if 'clos' == op:
+        if b'clos' == op:
             self.sock.shutdown(socket.SHUT_RDWR)
-        elif 'down' == op:
+        elif b'down' == op:
             logger.info('Calling server shutdown')
             self.server.shutdown()
-        elif 'dump' == op:
+        elif b'dump' == op:
             d = self.server.kvs.dump()
-            self.write(AsciiLenFormat%(len(d)), d)
+            self.write(AsciiLenFormat(len(d)), d)
             self.next_op()
-        elif op in ['get_', 'mkey', 'put_', 'view']:
+        elif op in [b'get_', b'mkey', b'put_', b'view']:
             self.next_lendata(partial(self.handle_opkey, op))
         else:
             raise Exception("Unknown op from %s: '%s'", repr(self.addr), op)
 
     def handle_opkey(self, op, key):
         #DEBUGOFF            logger.debug('(%s) %s key "%s"', whoAmI, reqtxt, key)
-        if 'mkey' == op:
+        if b'mkey' == op:
             self.next_lendata(partial(self.handle_mkey, key))
-        elif 'put_' == op:
+        elif b'put_' == op:
             self.next_read(4, lambda encoding:
                 self.next_lendata(partial(self.handle_put, key, encoding)))
         else: # 'get_' or 'view'
@@ -241,14 +244,14 @@ class KVSRequestHandler(Dispatcher):
 
     def handle_got(self, encval):
         (encoding, val) = encval
-        self.write(encoding, AsciiLenFormat%(len(val)), val)
+        self.write(encoding, AsciiLenFormat(len(val)), val)
         self.waiter = None
 
 class KVSWaiter:
     def __init__(self, op, key, handler):
-        if op == 'get_': op = 'get'
+        if op == b'get_': op = b'get'
         self.op = op
-        self.delete = op == 'get'
+        self.delete = op == b'get'
         self.key = key
         self.handler = handler
 
@@ -270,7 +273,7 @@ class KVS(object):
         # store and waiters are mutually exclusive, and could be kept in the same place
         self.store = DD(list)
         self.waiters = DD(list)
-        self.opCounts = {'get': 0, 'put': 0, 'view': 0, 'wait': 0}
+        self.opCounts = {b'get': 0, b'put': 0, b'view': 0, b'wait': 0}
         self.ac, self.rc = 0, 0
 
     def _doMonkeys(self, op, k):
@@ -279,19 +282,19 @@ class KVS(object):
         #DEBUGOFF        logger.debug('doMonkeys: %s %s %s', op, k, repr(self.key2mon[True][op] | self.key2mon[k][op]))
         for p in (True, k):
             for mk in self.key2mon[p][op]:
-                self.put(mk, ('ASTR', repr((op, k))))
+                self.put(mk, (b'ASTR', repr((op, k))))
         
     def dump(self):
         '''Utility function that returns a snapshot of the KV store.'''
         def vrep(v):
             # Omit or truncate some values, in which cases add the original length as a third value
-            if v[0] == 'JSON' or v[0] == 'HTML': return v
-            if v[0] != 'ASTR': return (v[0], None, len(v[1]))
+            if v[0] == b'JSON' or v[0] == b'HTML': return v
+            if v[0] != b'ASTR': return (v[0], None, len(v[1]))
             if v[1][:6].lower() == '<html>': return v # for backwards compatibility only
             if len(v[1]) > 50: return (v[0], v[1][:24] + '...' + v[1][-23:], len(v[1]))
             return v
 
-        return PDS(([self.opCounts['get'], self.opCounts['put'], self.opCounts['view'], self.opCounts['wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.iteritems() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.iteritems() if vv]))
+        return PDS(([self.opCounts[b'get'], self.opCounts[b'put'], self.opCounts[b'view'], self.opCounts[b'wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.iteritems() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.iteritems() if vv]))
 
     def wait(self, waiter):
         '''Atomically (remove and) return a value associated with key k. If
@@ -310,8 +313,8 @@ class KVS(object):
             waiter.handler(v)
         else:
             self.waiters[waiter.key].append(waiter)
-            self.opCounts['wait'] += 1
-            self._doMonkeys('wait', waiter.key)
+            self.opCounts[b'wait'] += 1
+            self._doMonkeys(b'wait', waiter.key)
             #DEBUGOFF                logger.debug('(%s) %s acquiring', repr(waiter), repr(s))
             self.ac += 1
 
@@ -339,11 +342,11 @@ class KVS(object):
 
         '''
         #DEBUGOFF        logger.debug('monkey: %s %s', mkey, v)
-        if ':' not in v: return #TODO: Add some sort of error handling?
+        if b':' not in v: return #TODO: Add some sort of error handling?
         self.monkeys.add(mkey)
-        k, events = v.rsplit(':', 1)
+        k, events = v.rsplit(b':', 1)
         if not k: k = True
-        for e, op  in [('g', 'get'), ('p', 'put'), ('v', 'view'), ('w', 'wait')]:
+        for e, op  in [(b'g', b'get'), (b'p', b'put'), (b'v', b'view'), (b'w', b'wait')]:
             if e in events:
                 self.key2mon[k][op].add(mkey)
             else:
@@ -354,7 +357,7 @@ class KVS(object):
     def put(self, k, v):
         '''Add value v to those associated with the key k.'''
         #DEBUGOFF        logger.debug('put: %s, %s', repr(k), repr(v))
-        self.opCounts['put'] += 1
+        self.opCounts[b'put'] += 1
         ww = self.waiters.get(k) # No waiters is probably most common, so optimize for
                                  # that. ww will be None if no waiters have been
                                  # registered for key k.
@@ -372,7 +375,7 @@ class KVS(object):
             if not ww: self.waiters.pop(k)
 
         if not consumed: self.store[k].append(v)
-        self._doMonkeys('put', k)
+        self._doMonkeys(b'put', k)
 
 class KVSServer(Thread):
     def __init__(self, host=None, port=0):

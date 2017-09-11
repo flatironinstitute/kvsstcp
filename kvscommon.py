@@ -34,20 +34,21 @@ import socket
 #
 
 AsciiLenChars = 10 
-AsciiLenFormat = '%%%dd'%AsciiLenChars
-# Might be nicer to make this '%%0%dd'.
-# Nothing checks to make sure lengths don't exceed 9GB...
+
+def AsciiLenFormat(n):
+    assert(n <= 999999999)
+    return str(n).encode('ascii').rjust(AsciiLenChars)
 
 if hasattr(socket, "MSG_WAITALL"):
     def recvall(s, n):
-        if not n: return ''
+        if not n: return b''
         r = s.recv(n, socket.MSG_WAITALL)
         if len(r) < n: raise socket.error('Connection dropped')
         return r
 else:
     def recvall(s, n):
         '''Wrapper to deal with partial recvs when we know there are N bytes to be had.'''
-        d = ''
+        d = b''
         while n:
             b = s.recv(n)
             if not b: raise socket.error('Connection dropped')
