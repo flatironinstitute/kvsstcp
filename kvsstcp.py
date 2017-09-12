@@ -125,6 +125,10 @@ class Dispatcher(object):
     def close(self):
         self.mask |= select.EPOLLHUP
         self.handler.unregister(self)
+        try:
+            self.sock.close()
+        except socket.error:
+            pass
 
     def handle_close(self):
         self.close()
