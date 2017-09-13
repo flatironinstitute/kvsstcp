@@ -392,6 +392,7 @@ class KVSServer(Thread):
         self.kvs = KVS()
 
         snof, hnof = resource.getrlimit(resource.RLIMIT_NOFILE)
+        hnof = min(hnof, 1000000) # don't need unreasonably many
         if snof < hnof:
             logger.info('Raising max open files from %d to %d', snof, hnof)
             resource.setrlimit(resource.RLIMIT_NOFILE, (hnof, hnof))
