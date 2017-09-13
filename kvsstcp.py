@@ -394,8 +394,12 @@ class KVSServer(Thread):
         snof, hnof = resource.getrlimit(resource.RLIMIT_NOFILE)
         hnof = min(hnof, 1000000) # don't need unreasonably many
         if snof < hnof:
-            logger.info('Raising max open files from %d to %d', snof, hnof)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (hnof, hnof))
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (hnof, hnof))
+                logger.info('Raised max open files from %d to %d', snof, hnof)
+            except:
+                logger.info('Failed to raise max open files from %d to %d; continuing anyway', snof, hnof)
+                pass
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setblocking(1)
