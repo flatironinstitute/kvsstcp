@@ -11,9 +11,10 @@ import logging
 import os
 import resource
 import select
+import signal
 import socket
 import sys
-from threading import Thread
+import threading
 
 try:
     from .kvscommon import *
@@ -28,15 +29,21 @@ logger = logging.getLogger('kvs')
 _DISCONNECTED = frozenset((errno.ECONNRESET, errno.ENOTCONN, errno.ESHUTDOWN, errno.ECONNABORTED, errno.EPIPE, errno.EBADF))
 _BUFSIZ = 8192
 
-class HandlerThread(Thread):
+class Handler(object):
     '''Based on asyncore, but with a simpler, stricter per-thread interface that allows better performance.'''
     def __init__(self):
-        super(HandlerThread, self).__init__(name='HandlerThread')
-        self.epoll = select.epoll()
+        try:
+            self.POLLIN, self.POLLOUT, self.POLLHUP = select.EPOLLIN, select.EPOLLOUT, select.EPOLLHUP
+            self.epoll = select.epoll()
+            self.EPOLL = True
+        except AttributeError:
+            # luckily the poll interface is close enough, but this will be severly limiting for multithreaded implementations
+            self.POLLIN, self.POLLOUT, self.POLLHUP = select.POLLIN, select.POLLOUT, select.POLLHUP
+            self.epoll = select.poll()
+            self.EPOLL = False
         self.disps = dict()
-        self.daemon = True
         self.current = None
-        self.start()
+        self.running = True
 
     def register(self, dispatcher):
         self.disps[dispatcher.fd] = dispatcher
@@ -54,22 +61,22 @@ class HandlerThread(Thread):
         for (f, e) in ev:
             d = self.current = self.disps[f]
             oldm = d.mask
-            if e & select.EPOLLHUP:
+            if e & self.POLLHUP:
                 d.handle_close()
                 continue
-            if e & select.EPOLLIN:
+            if e & self.POLLIN:
                 d.handle_read()
-                if d.mask & select.EPOLLHUP: continue
-            if d.mask & select.EPOLLOUT:
+                if d.mask & self.POLLHUP: continue
+            if d.mask & self.POLLOUT:
                 d.handle_write()
-                if d.mask & select.EPOLLHUP: continue
+                if d.mask & self.POLLHUP: continue
             self.current = None
             m = d.mask
             if m != oldm:
                 self.epoll.modify(f, m)
 
     def run(self):
-        while True:
+        while self.running:
             try:
                 self.poll()
             except IOError as e:
@@ -78,26 +85,41 @@ class HandlerThread(Thread):
                 raise
 
     def close(self):
-        self.epoll.close()
+        self.running = False
+        if self.EPOLL:
+            self.epoll.close()
 
 class Dispatcher(object):
-    '''Based on asyncore.dispatcher_with_send, works with EventHandler.
-    Also allows input of known-size blocks.'''
-    def __init__(self, sock, handler):
-        self.out_buf = []
-        self.in_buf = b''
-        self.read_size = 0
-        self.read_handler = None
+    def __init__(self, sock, handler, mask=0):
         self.sock = sock
         self.fd = sock.fileno()
-        self.mask = 0
+        self.mask = mask
         sock.setblocking(0)
         self.handler = handler
 
     def open(self):
         self.handler.register(self)
 
-    def _send(self, data):
+    def close(self):
+        self.mask |= self.handler.POLLHUP
+        self.handler.unregister(self)
+        try:
+            self.sock.close()
+        except socket.error:
+            pass
+
+    def accept(self):
+        try:
+            return self.sock.accept()
+        except socket.error as e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return
+            if e.errno in _DISCONNECTED or e.errno == errno.EINVAL:
+                self.handle_close()
+                return
+            raise
+
+    def send(self, data):
         try:
             return self.sock.send(data)
         except socket.error as e:
@@ -108,7 +130,7 @@ class Dispatcher(object):
                 return 0
             raise
 
-    def _recv(self, siz):
+    def recv(self, siz):
         try:
             data = self.sock.recv(siz)
             if not data:
@@ -122,21 +144,23 @@ class Dispatcher(object):
                 return b''
             raise
 
-    def close(self):
-        self.mask |= select.EPOLLHUP
-        self.handler.unregister(self)
-        try:
-            self.sock.close()
-        except socket.error:
-            pass
-
     def handle_close(self):
         self.close()
 
+class StreamDispatcher(Dispatcher):
+    '''Based on asyncore.dispatcher_with_send, works with EventHandler.
+    Also allows input of known-size blocks.'''
+    def __init__(self, sock, handler):
+        super(StreamDispatcher, self).__init__(sock, handler)
+        self.out_buf = []
+        self.in_buf = b''
+        self.read_size = 0
+        self.read_handler = None
+
     def write(self, *data):
         self.out_buf.extend(data)
-        if not self.mask & select.EPOLLOUT:
-            self.mask |= select.EPOLLOUT
+        if not self.mask & self.handler.POLLOUT:
+            self.mask |= self.handler.POLLOUT
             # write can be called from other threads
             if self.handler.current is not self:
                 self.handler.modify(self)
@@ -144,25 +168,25 @@ class Dispatcher(object):
     def handle_write(self):
         while self.out_buf:
             buf = self.out_buf[0]
-            r = self._send(buf)
+            r = self.send(buf)
             if r < len(buf):
                 if r: self.out_buf[0] = buf[r:]
                 return
             self.out_buf.pop(0)
-        self.mask &= ~select.EPOLLOUT
+        self.mask &= ~self.handler.POLLOUT
 
     def got_read(self, z):
         i = self.in_buf[:z]
         handler = self.read_handler
         self.in_buf = self.in_buf[z:]
         self.read_handler = None
-        self.mask &= ~select.EPOLLIN
+        self.mask &= ~self.handler.POLLIN
         handler(i)
 
     def next_read(self, size, f):
         self.read_size = size
         self.read_handler = f
-        self.mask |= select.EPOLLIN
+        self.mask |= self.handler.POLLIN
         if size <= len(self.in_buf):
             self.got_read(size)
 
@@ -170,12 +194,12 @@ class Dispatcher(object):
         z = self.read_size
         n = len(self.in_buf)
         if n < z:
-            self.in_buf += self._recv(max(_BUFSIZ, z-n))
+            self.in_buf += self.recv(max(_BUFSIZ, z-n))
             n = len(self.in_buf)
         if n >= z:
             self.got_read(z)
 
-class KVSRequestHandler(Dispatcher):
+class KVSRequestHandler(StreamDispatcher):
     def __init__(self, pair, server, handler):
         sock, self.addr = pair
         self.server = server
@@ -384,9 +408,8 @@ class KVS(object):
         if not consumed: self.store[k].append(v)
         self._doMonkeys(b'put', k)
 
-class KVSServer(Thread):
+class KVSServer(threading.Thread, Dispatcher):
     def __init__(self, host=None, port=0):
-        super(KVSServer, self).__init__(name='KVSServerThread')
         if not host: host = socket.gethostname()
 
         self.kvs = KVS()
@@ -409,26 +432,27 @@ class KVSServer(Thread):
         self.sock.listen(4000)
         self.cinfo = self.sock.getsockname()
 
-        self.handler = HandlerThread()
+        self.handler = Handler()
+        Dispatcher.__init__(self, self.sock, self.handler, self.handler.POLLIN)
+        self.open()
 
+        threading.Thread.__init__(self, name='KVSServerThread', target=self.handler.run)
         self.start()
 
-    def shutdown(self):
-        if self.sock:
-            self.sock.shutdown(socket.SHUT_RDWR)
-
-    def run(self):
-        while True:
-            try:
-                pair = self.sock.accept()
-            except socket.error as e:
-                if e.errno in _DISCONNECTED or e.errno == errno.EINVAL:
-                    break
-                raise
+    def handle_read(self):
+        pair = self.accept()
+        if pair:
             KVSRequestHandler(pair, self, self.handler)
+
+    def shutdown(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except socket.error as e:
+            if e.errno not in _DISCONNECTED: raise
+
+    def handle_close(self):
         logger.info('Server shutting down')
-        self.sock.close()
-        self.sock = None
+        self.close()
         self.handler.close()
 
     def env(self, env = os.environ.copy()):
