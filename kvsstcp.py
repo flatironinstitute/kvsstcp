@@ -140,10 +140,7 @@ class KQueueHandler(Handler):
         disp.oldmask = disp.mask
 
     def poll(self):
-        sys.stdout.write('wait... ')
-        sys.stdout.flush()
         ev = self.kqueue.control(None, 1024)
-        print(ev)
         for e in ev:
             d = self.current = self.disps[e.ident]
             if e.filter == select.KQ_FILTER_READ:
@@ -214,6 +211,7 @@ class Dispatcher(object):
 
     def shutdown(self):
         try:
+            self.mask |= self.handler.IN
             self.sock.shutdown(socket.SHUT_RDWR)
         except socket.error as e:
             if e.errno not in _DISCONNECTED: raise
@@ -251,7 +249,6 @@ class StreamDispatcher(Dispatcher):
         self.in_buf = self.in_buf[z:]
         self.read_handler = None
         self.mask &= ~self.handler.IN
-        print("read(%d) = %r"%(self.fd, i))
         handler(i)
 
     def next_read(self, size, f):
@@ -267,7 +264,6 @@ class StreamDispatcher(Dispatcher):
         if n < z:
             self.in_buf += self.recv(max(_BUFSIZ, z-n))
             n = len(self.in_buf)
-            print("buf(%d) = %r"%(self.fd, self.in_buf))
         if n >= z:
             self.got_read(z)
 
@@ -422,7 +418,6 @@ class KVS(object):
                 v = vv[self.viewIndex]
             self.opCounts[waiter.op] += 1
             #DEBUGOFF                logger.debug('_gv (%s): %s => %s (%d)', waiter.op, waiter.key, repr(v[0]), len(v[1]))
-            print("get %s=%r"%(waiter.key, vv))
             waiter.handler(v)
         else:
             self.waiters[waiter.key].append(waiter)
@@ -488,7 +483,6 @@ class KVS(object):
             if not ww: self.waiters.pop(k)
 
         if not consumed: self.store[k].append(v)
-        print("put %s=%r"%(k, self.store[k]))
         self._doMonkeys(b'put', k)
 
 class KVSServer(threading.Thread, Dispatcher):
