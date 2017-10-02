@@ -172,7 +172,6 @@ class Dispatcher(object):
         self.mask = self.handler.EOF
         self.handler.unregister(self)
         try:
-            print("close(%d)"%self.fd)
             self.sock.close()
         except socket.error:
             pass
@@ -280,13 +279,17 @@ class KVSRequestHandler(StreamDispatcher):
         self.waiter = None
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         super(KVSRequestHandler, self).__init__(sock, handler)
-        logger.info('Accepted connect from %s', repr(self.addr))
+        logger.info('Accepted connect from %r', self.addr)
         self.next_op()
         self.open()
 
     def handle_close(self):
         self.cancel_waiter()
-        logger.info('Closing connection from %s', repr(self.addr))
+        logger.info('Closing connection from %r', self.addr)
+        self.close()
+
+    def error(self, msg):
+        logger.error('Error from %r: %s' % (self.addr, msg))
         self.close()
 
     def cancel_waiter(self):
@@ -300,8 +303,13 @@ class KVSRequestHandler(StreamDispatcher):
     def next_lendata(self, handler):
         # wait for variable-length data prefixed by AsciiLenFormat
         def handle_len(l):
-            n = int(l)
-            if n < 0: raise Exception("invalid data len: '%s'" % l)
+            try:
+                n = int(l)
+            except ValueError:
+                n = -1
+            if n < 0:
+                self.error("invalid data len: '%s'" % l)
+                return
             self.next_read(n, handler)
         self.next_read(AsciiLenChars, handle_len)
 
@@ -318,7 +326,7 @@ class KVSRequestHandler(StreamDispatcher):
         elif op in [b'get_', b'mkey', b'put_', b'view']:
             self.next_lendata(partial(self.handle_opkey, op))
         else:
-            raise Exception("Unknown op from %s: '%s'", repr(self.addr), op)
+            self.error("Unknown op: '%r'" % op)
 
     def handle_opkey(self, op, key):
         #DEBUGOFF            logger.debug('(%s) %s key "%s"', whoAmI, reqtxt, key)
