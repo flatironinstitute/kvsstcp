@@ -96,6 +96,9 @@ class PollHandler(Handler):
             if d.mask != oldm and not (d.mask & self.EOF):
                 self.modify(d)
 
+    def stop(self, disp):
+        Handler.close(self)
+
 class EPollHandler(PollHandler):
     def __init__(self):
         self.IN, self.OUT, self.EOF = select.EPOLLIN, select.EPOLLOUT, select.EPOLLHUP
@@ -138,7 +141,13 @@ class KQueueHandler(Handler):
         disp.curmask = disp.mask
 
     def poll(self):
-        ev = self.kqueue.control(None, 1024)
+        try:
+            ev = self.kqueue.control(None, 1024)
+        except OSError as e:
+            if e.errno == errno.EBADF:
+                self.running = False
+                return
+            raise
         for e in ev:
             d = self.current = self.disps[e.ident]
             if e.filter == select.KQ_FILTER_READ:
@@ -146,11 +155,14 @@ class KQueueHandler(Handler):
             elif e.filter == select.KQ_FILTER_WRITE:
                 d.handle_write()
             self.current = None
-            self.modify(d)
+            if self.running: self.modify(d)
 
     def close(self):
         self.kqueue.close()
         Handler.close(self)
+
+    def stop(self, disp):
+        self.close()
 
 class Dispatcher(object):
     def __init__(self, sock, handler, mask=0):
@@ -527,12 +539,12 @@ class KVSServer(threading.Thread, Dispatcher):
     def handle_close(self):
         logger.info('Server shutting down')
         self.close()
-        self.handler.running = False
+        self.handler.close()
 
     def shutdown(self):
         if self.handler.running:
             super(KVSServer, self).shutdown()
-            self.handle_close()
+            self.handler.stop(self)
 
     def env(self, env = os.environ.copy()):
         '''Add the KVSSTCP environment variables to the given environment.'''
