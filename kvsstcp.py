@@ -50,6 +50,7 @@ class Handler(object):
                 if e.errno == errno.EINTR:
                     continue
                 raise
+        self.close()
 
     def writable(self, disp):
         "Equivalent to setting mask | OUT, but safe to be called from other (non-current) handlers."
@@ -62,25 +63,25 @@ class Handler(object):
     def close(self):
         self.running = False
 
-class EPollHandler(Handler):
+class PollHandler(Handler):
     def __init__(self):
-        self.IN, self.OUT, self.EOF = select.EPOLLIN, select.EPOLLOUT, select.EPOLLHUP
-        self.epoll = select.epoll()
+        self.IN, self.OUT, self.EOF = select.POLLIN, select.POLLOUT, select.POLLHUP
+        self.poller = select.poll()
         Handler.__init__(self)
 
     def register(self, disp):
         Handler.register(self, disp)
-        self.epoll.register(disp.fd, disp.mask)
+        self.poller.register(disp.fd, disp.mask)
 
     def unregister(self, disp):
-        self.epoll.unregister(disp.fd)
+        self.poller.unregister(disp.fd)
         Handler.unregister(self, disp)
 
     def modify(self, disp):
-        self.epoll.modify(disp.fd, disp.mask)
+        self.poller.modify(disp.fd, disp.mask)
 
     def poll(self):
-        ev = self.epoll.poll()
+        ev = self.poller.poll()
         for (f, e) in ev:
             d = self.current = self.disps[f]
             oldm = d.mask
@@ -95,17 +96,14 @@ class EPollHandler(Handler):
             if d.mask != oldm and not (d.mask & self.EOF):
                 self.modify(d)
 
-    def close(self):
-        self.epoll.close()
-        Handler.close(self)
-
-class PollHandler(EPollHandler):
+class EPollHandler(PollHandler):
     def __init__(self):
-        self.IN, self.OUT, self.EOF = select.POLLIN, select.POLLOUT, select.POLLHUP
-        self.epoll = select.poll()
+        self.IN, self.OUT, self.EOF = select.EPOLLIN, select.EPOLLOUT, select.EPOLLHUP
+        self.poller = select.epoll()
         Handler.__init__(self)
 
     def close(self):
+        self.poller.close()
         Handler.close(self)
 
 class KQueueHandler(Handler):
@@ -116,7 +114,7 @@ class KQueueHandler(Handler):
 
     def register(self, disp):
         Handler.register(self, disp)
-        disp.oldmask = 0
+        disp.curmask = 0
         self.modify(disp)
 
     def unregister(self, disp):
@@ -127,17 +125,17 @@ class KQueueHandler(Handler):
     def modify(self, disp):
         c = []
         if disp.mask & self.IN:
-            if not (disp.oldmask & self.IN):
+            if not (disp.curmask & self.IN):
                 c.append(select.kevent(disp.fd, select.KQ_FILTER_READ, select.KQ_EV_ADD))
-        elif disp.oldmask & self.IN:
+        elif disp.curmask & self.IN:
             c.append(select.kevent(disp.fd, select.KQ_FILTER_READ, select.KQ_EV_DELETE))
         if disp.mask & self.OUT:
-            if not (disp.oldmask & self.OUT):
+            if not (disp.curmask & self.OUT):
                 c.append(select.kevent(disp.fd, select.KQ_FILTER_WRITE, select.KQ_EV_ADD))
-        elif disp.oldmask & self.OUT:
+        elif disp.curmask & self.OUT:
             c.append(select.kevent(disp.fd, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE))
         if c: self.kqueue.control(c, 0)
-        disp.oldmask = disp.mask
+        disp.curmask = disp.mask
 
     def poll(self):
         ev = self.kqueue.control(None, 1024)
@@ -529,7 +527,12 @@ class KVSServer(threading.Thread, Dispatcher):
     def handle_close(self):
         logger.info('Server shutting down')
         self.close()
-        self.handler.close()
+        self.handler.running = False
+
+    def shutdown(self):
+        if self.handler.running:
+            super(KVSServer, self).shutdown()
+            self.handle_close()
 
     def env(self, env = os.environ.copy()):
         '''Add the KVSSTCP environment variables to the given environment.'''
