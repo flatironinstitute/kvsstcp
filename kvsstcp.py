@@ -32,48 +32,15 @@ _BUFSIZ = 8192
 class Handler(object):
     '''Based on asyncore, but with a simpler, stricter per-thread interface that allows better performance.'''
     def __init__(self):
-        try:
-            self.POLLIN, self.POLLOUT, self.POLLHUP = select.EPOLLIN, select.EPOLLOUT, select.EPOLLHUP
-            self.epoll = select.epoll()
-            self.EPOLL = True
-        except AttributeError:
-            # luckily the poll interface is close enough, but this will be severly limiting for multithreaded implementations
-            self.POLLIN, self.POLLOUT, self.POLLHUP = select.POLLIN, select.POLLOUT, select.POLLHUP
-            self.epoll = select.poll()
-            self.EPOLL = False
         self.disps = dict()
         self.current = None
         self.running = True
 
-    def register(self, dispatcher):
-        self.disps[dispatcher.fd] = dispatcher
-        self.epoll.register(dispatcher.fd, dispatcher.mask)
+    def register(self, disp):
+        self.disps[disp.fd] = disp
 
-    def unregister(self, dispatcher):
-        self.epoll.unregister(dispatcher.fd)
-        del self.disps[dispatcher.fd]
-
-    def modify(self, dispatcher):
-        self.epoll.modify(dispatcher.fd, dispatcher.mask)
-
-    def poll(self):
-        ev = self.epoll.poll()
-        for (f, e) in ev:
-            d = self.current = self.disps[f]
-            oldm = d.mask
-            if e & self.POLLHUP:
-                d.handle_close()
-                continue
-            if e & self.POLLIN:
-                d.handle_read()
-                if d.mask & self.POLLHUP: continue
-            if d.mask & self.POLLOUT:
-                d.handle_write()
-                if d.mask & self.POLLHUP: continue
-            self.current = None
-            m = d.mask
-            if m != oldm:
-                self.epoll.modify(f, m)
+    def unregister(self, disp):
+        del self.disps[disp.fd]
 
     def run(self):
         while self.running:
@@ -84,10 +51,111 @@ class Handler(object):
                     continue
                 raise
 
+    def writable(self, disp):
+        "Equivalent to setting mask | OUT, but safe to be called from other (non-current) handlers."
+        if disp.mask & self.OUT: return
+        disp.mask |= self.OUT
+        # write can be called from other threads
+        if self.current is not disp:
+            self.modify(disp)
+
     def close(self):
         self.running = False
-        if self.EPOLL:
-            self.epoll.close()
+
+class EPollHandler(Handler):
+    def __init__(self):
+        self.IN, self.OUT, self.EOF = select.EPOLLIN, select.EPOLLOUT, select.EPOLLHUP
+        self.epoll = select.epoll()
+        Handler.__init__(self)
+
+    def register(self, disp):
+        Handler.register(self, disp)
+        self.epoll.register(disp.fd, disp.mask)
+
+    def unregister(self, disp):
+        self.epoll.unregister(disp.fd)
+        Handler.unregister(self, disp)
+
+    def modify(self, disp):
+        self.epoll.modify(disp.fd, disp.mask)
+
+    def poll(self):
+        ev = self.epoll.poll()
+        for (f, e) in ev:
+            d = self.current = self.disps[f]
+            oldm = d.mask
+            if e & self.EOF:
+                d.handle_close()
+                continue
+            if e & self.IN:
+                d.handle_read()
+            if d.mask & self.OUT:
+                d.handle_write()
+            self.current = None
+            if d.mask != oldm and not (d.mask & self.EOF):
+                self.modify(d)
+
+    def close(self):
+        self.epoll.close()
+        Handler.close(self)
+
+class PollHandler(EPollHandler):
+    def __init__(self):
+        self.IN, self.OUT, self.EOF = select.POLLIN, select.POLLOUT, select.POLLHUP
+        self.epoll = select.poll()
+        Handler.__init__(self)
+
+    def close(self):
+        Handler.close(self)
+
+class KQueueHandler(Handler):
+    def __init__(self):
+        self.IN, self.OUT, self.EOF = 1, 2, 4
+        self.kqueue = select.kqueue()
+        Handler.__init__(self)
+
+    def register(self, disp):
+        Handler.register(self, disp)
+        disp.oldmask = 0
+        self.modify(disp)
+
+    def unregister(self, disp):
+        disp.mask = 0
+        self.modify(disp)
+        Handler.unregister(self, disp)
+
+    def modify(self, disp):
+        c = []
+        if disp.mask & self.IN:
+            if not (disp.oldmask & self.IN):
+                c.append(select.kevent(disp.fd, select.KQ_FILTER_READ, select.KQ_EV_ADD))
+        elif disp.oldmask & self.IN:
+            c.append(select.kevent(disp.fd, select.KQ_FILTER_READ, select.KQ_EV_DELETE))
+        if disp.mask & self.OUT:
+            if not (disp.oldmask & self.OUT):
+                c.append(select.kevent(disp.fd, select.KQ_FILTER_WRITE, select.KQ_EV_ADD))
+        elif disp.oldmask & self.OUT:
+            c.append(select.kevent(disp.fd, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE))
+        if c: self.kqueue.control(c, 0)
+        disp.oldmask = disp.mask
+
+    def poll(self):
+        sys.stdout.write('wait... ')
+        sys.stdout.flush()
+        ev = self.kqueue.control(None, 1024)
+        print(ev)
+        for e in ev:
+            d = self.current = self.disps[e.ident]
+            if e.filter == select.KQ_FILTER_READ:
+                d.handle_read()
+            elif e.filter == select.KQ_FILTER_WRITE:
+                d.handle_write()
+            self.current = None
+            self.modify(d)
+
+    def close(self):
+        self.kqueue.close()
+        Handler.close(self)
 
 class Dispatcher(object):
     def __init__(self, sock, handler, mask=0):
@@ -101,9 +169,10 @@ class Dispatcher(object):
         self.handler.register(self)
 
     def close(self):
-        self.mask |= self.handler.POLLHUP
+        self.mask = self.handler.EOF
         self.handler.unregister(self)
         try:
+            print("close(%d)"%self.fd)
             self.sock.close()
         except socket.error:
             pass
@@ -144,6 +213,12 @@ class Dispatcher(object):
                 return b''
             raise
 
+    def shutdown(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except socket.error as e:
+            if e.errno not in _DISCONNECTED: raise
+
     def handle_close(self):
         self.close()
 
@@ -159,11 +234,7 @@ class StreamDispatcher(Dispatcher):
 
     def write(self, *data):
         self.out_buf.extend(data)
-        if not self.mask & self.handler.POLLOUT:
-            self.mask |= self.handler.POLLOUT
-            # write can be called from other threads
-            if self.handler.current is not self:
-                self.handler.modify(self)
+        self.handler.writable(self)
 
     def handle_write(self):
         while self.out_buf:
@@ -173,20 +244,21 @@ class StreamDispatcher(Dispatcher):
                 if r: self.out_buf[0] = buf[r:]
                 return
             self.out_buf.pop(0)
-        self.mask &= ~self.handler.POLLOUT
+        self.mask &= ~self.handler.OUT
 
     def got_read(self, z):
         i = self.in_buf[:z]
         handler = self.read_handler
         self.in_buf = self.in_buf[z:]
         self.read_handler = None
-        self.mask &= ~self.handler.POLLIN
+        self.mask &= ~self.handler.IN
+        print("read(%d) = %r"%(self.fd, i))
         handler(i)
 
     def next_read(self, size, f):
         self.read_size = size
         self.read_handler = f
-        self.mask |= self.handler.POLLIN
+        self.mask |= self.handler.IN
         if size <= len(self.in_buf):
             self.got_read(size)
 
@@ -196,6 +268,7 @@ class StreamDispatcher(Dispatcher):
         if n < z:
             self.in_buf += self.recv(max(_BUFSIZ, z-n))
             n = len(self.in_buf)
+            print("buf(%d) = %r"%(self.fd, self.in_buf))
         if n >= z:
             self.got_read(z)
 
@@ -234,7 +307,7 @@ class KVSRequestHandler(StreamDispatcher):
 
     def handle_op(self, op):
         if b'clos' == op:
-            self.sock.shutdown(socket.SHUT_RDWR)
+            self.shutdown()
         elif b'down' == op:
             logger.info('Calling server shutdown')
             self.server.shutdown()
@@ -341,6 +414,7 @@ class KVS(object):
                 v = vv[self.viewIndex]
             self.opCounts[waiter.op] += 1
             #DEBUGOFF                logger.debug('_gv (%s): %s => %s (%d)', waiter.op, waiter.key, repr(v[0]), len(v[1]))
+            print("get %s=%r"%(waiter.key, vv))
             waiter.handler(v)
         else:
             self.waiters[waiter.key].append(waiter)
@@ -406,6 +480,7 @@ class KVS(object):
             if not ww: self.waiters.pop(k)
 
         if not consumed: self.store[k].append(v)
+        print("put %s=%r"%(k, self.store[k]))
         self._doMonkeys(b'put', k)
 
 class KVSServer(threading.Thread, Dispatcher):
@@ -432,8 +507,13 @@ class KVSServer(threading.Thread, Dispatcher):
         self.sock.listen(4000)
         self.cinfo = self.sock.getsockname()
 
-        self.handler = Handler()
-        Dispatcher.__init__(self, self.sock, self.handler, self.handler.POLLIN)
+        if hasattr(select, 'epoll'):
+            self.handler = EPollHandler()
+        elif hasattr(select, 'kqueue'):
+            self.handler = KQueueHandler()
+        else:
+            self.handler = PollHandler()
+        Dispatcher.__init__(self, self.sock, self.handler, self.handler.IN)
         self.open()
 
         threading.Thread.__init__(self, name='KVSServerThread', target=self.handler.run)
@@ -443,12 +523,6 @@ class KVSServer(threading.Thread, Dispatcher):
         pair = self.accept()
         if pair:
             KVSRequestHandler(pair, self, self.handler)
-
-    def shutdown(self):
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except socket.error as e:
-            if e.errno not in _DISCONNECTED: raise
 
     def handle_close(self):
         logger.info('Server shutting down')
