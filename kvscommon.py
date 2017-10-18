@@ -1,3 +1,4 @@
+import os
 import socket
 
 # The line protocol is very simple:
@@ -39,7 +40,8 @@ def AsciiLenFormat(n):
     assert(n <= 999999999)
     return str(n).encode('ascii').rjust(AsciiLenChars)
 
-if hasattr(socket, "MSG_WAITALL"):
+if hasattr(socket, "MSG_WAITALL") and os.uname()[0] != 'Darwin':
+    # MSG_WAITALL on OSX ends up blocking if the tcp buffer is not big enough for the entire message: don't use it
     def recvall(s, n):
         if not n: return b''
         r = s.recv(n, socket.MSG_WAITALL)
