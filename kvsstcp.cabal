@@ -10,7 +10,7 @@ cabal-version:       >= 1.10
 
 source-repository head
   type: git
-  location: https://github.com/simonsfoundation/kvsstcp
+  location: https://github.com/flatironinstitute/kvsstcp
 
 library
   exposed-modules:
