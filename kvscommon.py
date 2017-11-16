@@ -37,7 +37,7 @@ import socket
 AsciiLenChars = 10 
 
 def AsciiLenFormat(n):
-    assert(n <= 999999999)
+    assert(n <= 9999999999)
     return str(n).encode('ascii').rjust(AsciiLenChars)
 
 if hasattr(socket, "MSG_WAITALL") and os.uname()[0] != 'Darwin':
