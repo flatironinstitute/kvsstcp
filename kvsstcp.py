@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 from collections import defaultdict as DD
 try:
     from cPickle import dumps as PDS
