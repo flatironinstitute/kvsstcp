@@ -202,10 +202,14 @@ class KVSClient(object):
         elif encoding is False:
             # TODO: Is this silent stringification two clever by half?
             # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
-            if type(value) != str: value = repr(v)
+            if type(value) is not str and type(value) is not bytes: value = repr(v)
             encoding = b'ASTR'
-        elif type(encoding) != str or len(encoding) != 4:
-            raise TypeError('Invalid encoding: %s'%encoding)
+        else:
+            if type(encoding) is not bytes:
+                if type(encoding) is not str: encoding = repr(encoding)
+                encoding = bytes(encoding, 'utf-8')
+            if len(encoding) != 4:
+                raise TypeError('Invalid encoding: %s'%encoding)
 
         self.socket.sendall(b'put_')
         self._sendLenAndBytes(key)
