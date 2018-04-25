@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 from distutils.core import setup
 setup(name='kvsstcp', version='0',
     description="Key value storage server",
