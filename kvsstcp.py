@@ -219,6 +219,20 @@ class Dispatcher(object):
                 return b''
             raise
 
+    def recv_into(self, buf):
+        try:
+            n = self.sock.recv_into(buf)
+            if n == 0:
+                self.handle_close()
+            return n
+        except socket.error as e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return b''
+            if e.errno in _DISCONNECTED:
+                self.handle_close()
+                return b''
+            raise
+
     def shutdown(self):
         try:
             self.mask |= self.handler.IN
@@ -235,47 +249,52 @@ class StreamDispatcher(Dispatcher):
     def __init__(self, sock, handler):
         super(StreamDispatcher, self).__init__(sock, handler)
         self.out_buf = []
-        self.in_buf = b''
+        self.in_buf = memoryview(bytearray(_BUFSIZ))
+        self.in_off = 0
         self.read_size = 0
         self.read_handler = None
 
     def write(self, *data):
-        self.out_buf.extend(data)
+        for d in data:
+            self.out_buf.append(memoryview(d))
         self.handler.writable(self)
 
     def handle_write(self):
         while self.out_buf:
             buf = self.out_buf[0]
-            r = self.send(buf)
+            r = self.send(buf[:1048576])
             if r < len(buf):
                 if r: self.out_buf[0] = buf[r:]
                 return
             self.out_buf.pop(0)
         self.mask &= ~self.handler.OUT
 
-    def got_read(self, z):
+    def got_read(self):
+        z = self.read_size
+        if self.in_off < z:
+            return
         i = self.in_buf[:z]
         handler = self.read_handler
         self.in_buf = self.in_buf[z:]
+        self.in_off -= z
         self.read_handler = None
         self.mask &= ~self.handler.IN
         handler(i)
 
     def next_read(self, size, f):
         self.read_size = size
+        if size > len(self.in_buf):
+            buf = memoryview(bytearray(max(size, _BUFSIZ)))
+            buf[:self.in_off] = self.in_buf[:self.in_off]
+            self.in_buf = buf
         self.read_handler = f
         self.mask |= self.handler.IN
-        if size <= len(self.in_buf):
-            self.got_read(size)
+        self.got_read()
 
     def handle_read(self):
-        z = self.read_size
-        n = len(self.in_buf)
-        if n < z:
-            self.in_buf += self.recv(max(_BUFSIZ, z-n))
-            n = len(self.in_buf)
-        if n >= z:
-            self.got_read(z)
+        if self.in_off < len(self.in_buf):
+            self.in_off += self.recv_into(self.in_buf[self.in_off:])
+        self.got_read()
 
 class KVSRequestHandler(StreamDispatcher):
     def __init__(self, pair, server, handler):
@@ -309,6 +328,7 @@ class KVSRequestHandler(StreamDispatcher):
     def next_lendata(self, handler):
         # wait for variable-length data prefixed by AsciiLenFormat
         def handle_len(l):
+            l = l.tobytes()
             try:
                 n = int(l)
             except ValueError:
@@ -335,6 +355,7 @@ class KVSRequestHandler(StreamDispatcher):
             self.error("Unknown op: '%r'" % op)
 
     def handle_opkey(self, op, key):
+        key = key.tobytes()
         #DEBUGOFF            logger.debug('(%s) %s key "%s"', whoAmI, reqtxt, key)
         if b'mkey' == op:
             self.next_lendata(partial(self.handle_mkey, key))
@@ -405,14 +426,15 @@ class KVS(object):
     def dump(self):
         '''Utility function that returns a snapshot of the KV store.'''
         def vrep(v):
+            t = v[0].tobytes()
             # Omit or truncate some values, in which cases add the original length as a third value
-            if v[0] == b'JSON' or v[0] == b'HTML': return v
-            if v[0] != b'ASTR': return (v[0], None, len(v[1]))
-            if v[1][:6].lower() == '<html>': return v # for backwards compatibility only
-            if len(v[1]) > 50: return (v[0], v[1][:24] + '...' + v[1][-23:], len(v[1]))
-            return v
+            if v == b'JSON' or t == b'HTML': return (t, v[1].tobytes())
+            if t != b'ASTR': return (t, None, len(v[1]))
+            if v[1][:6].tobytes().lower() == '<html>': return (t, v[1].tobytes()) # for backwards compatibility only
+            if len(v[1]) > 50: return (t, v[1][:24].tobytes() + '...' + v[1][-23:].tobytes(), len(v[1]))
+            return (t, v[1].tobytes())
 
-        return PDS(([self.opCounts[b'get'], self.opCounts[b'put'], self.opCounts[b'view'], self.opCounts[b'wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.items() if v], [[k, len(vv), vrep(vv[-1])] for k, vv in self.store.items() if vv]))
+        return PDS(([self.opCounts[b'get'], self.opCounts[b'put'], self.opCounts[b'view'], self.opCounts[b'wait'], self.ac, self.rc], [(k, len(v)) for k, v in self.waiters.items() if v], [(k, len(vv), vrep(vv[-1])) for k, vv in self.store.items() if vv]))
 
     def wait(self, waiter):
         '''Atomically (remove and) return a value associated with key k. If

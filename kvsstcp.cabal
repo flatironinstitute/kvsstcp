@@ -1,7 +1,7 @@
 name:                kvsstcp
 version:             0
 synopsis:            Key value storage server and client
--- license:          ?
+license:             Apache-2.0
 author:              Dylan Simon
 maintainer:          dsimon@flatironinstitute.org
 category:            Network, Distributed Computing
