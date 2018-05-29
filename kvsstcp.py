@@ -340,6 +340,7 @@ class KVSRequestHandler(StreamDispatcher):
         self.next_read(AsciiLenChars, handle_len)
 
     def handle_op(self, op):
+        op = op.tobytes()
         if b'clos' == op:
             self.shutdown()
         elif b'down' == op:
