@@ -269,18 +269,6 @@ class StreamDispatcher(Dispatcher):
             self.out_buf.pop(0)
         self.mask &= ~self.handler.OUT
 
-    def got_read(self):
-        z = self.read_size
-        if self.in_off < z:
-            return
-        i = self.in_buf[:z]
-        handler = self.read_handler
-        self.in_buf = self.in_buf[z:]
-        self.in_off -= z
-        self.read_handler = None
-        self.mask &= ~self.handler.IN
-        handler(i)
-
     def next_read(self, size, f):
         self.read_size = size
         if size > len(self.in_buf):
@@ -289,12 +277,21 @@ class StreamDispatcher(Dispatcher):
             self.in_buf = buf
         self.read_handler = f
         self.mask |= self.handler.IN
-        self.got_read()
 
     def handle_read(self):
         if self.in_off < len(self.in_buf):
             self.in_off += self.recv_into(self.in_buf[self.in_off:])
-        self.got_read()
+        while True:
+            handler = self.read_handler
+            z = self.read_size
+            if not handler or self.in_off < z:
+                return
+            i = self.in_buf[:z]
+            self.in_buf = self.in_buf[z:]
+            self.in_off -= z
+            self.read_handler = None
+            self.mask &= ~self.handler.IN
+            handler(i)
 
 class KVSRequestHandler(StreamDispatcher):
     def __init__(self, pair, server, handler):
