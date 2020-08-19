@@ -11,7 +11,6 @@ import logging
 import os
 import resource
 import select
-import signal
 import socket
 import sys
 import threading
@@ -28,6 +27,27 @@ logger = logging.getLogger('kvs')
 
 _DISCONNECTED = frozenset((errno.ECONNRESET, errno.ENOTCONN, errno.ESHUTDOWN, errno.ECONNABORTED, errno.EPIPE, errno.EBADF))
 _BUFSIZ = 8192
+
+# Concepts:
+#
+# Every connection is represented by a dispatcher.
+#
+# Every dispatcher is registered with a handler, which in effect runs
+# the KVS server loop.
+#
+# The handler runs an infinite loop that mostly sits on a poll of some
+# sort waiting for one or more events associated with registered
+# connections (identified by their file descriptor).
+#
+# When an event occurs the dispatcher associated with the connection
+# is used to process the event.
+#
+# The listening socket is treated just like any other connection and
+# has its own dispatcher. An "event" on this connection triggers an
+# accept that leads to the creation of a new dispatcher
+# (KVSRequestDispatcher) to handle exchanges with the client.
+#
+# This approach has the very important benefit that it is single threaded.
 
 class Handler(object):
     '''Based on asyncore, but with a simpler, stricter per-thread interface that allows better performance.'''
@@ -50,6 +70,11 @@ class Handler(object):
                 if e.errno == errno.EINTR:
                     continue
                 raise
+        for d in list(self.disps.values()):
+            try:
+                d.close()
+            except Exception as e:
+                logger.info('%r reported %r on close in handler.', d, e)
         self.close()
 
     def writable(self, disp):
@@ -293,14 +318,14 @@ class StreamDispatcher(Dispatcher):
             self.mask &= ~self.handler.IN
             handler(i)
 
-class KVSRequestHandler(StreamDispatcher):
+class KVSRequestDispatcher(StreamDispatcher):
     def __init__(self, pair, server, handler):
         sock, self.addr = pair
         self.server = server
         # Keep track of any currently waiting get:
         self.waiter = None
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        super(KVSRequestHandler, self).__init__(sock, handler)
+        super(KVSRequestDispatcher, self).__init__(sock, handler)
         logger.info('Accepted connect from %r', self.addr)
         self.next_op()
         self.open()
@@ -554,7 +579,7 @@ class KVSServer(threading.Thread, Dispatcher):
     def handle_read(self):
         pair = self.accept()
         if pair:
-            KVSRequestHandler(pair, self, self.handler)
+            KVSRequestDispatcher(pair, self, self.handler)
 
     def handle_close(self):
         logger.info('Server shutting down')
