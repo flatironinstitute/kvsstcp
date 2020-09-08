@@ -624,6 +624,7 @@ if '__main__' == __name__:
     try:
         if args.execcmd:
             import subprocess
+            logger.info('Launching: %r, env %r', args.execcmd, t.env())
             subprocess.check_call(args.execcmd, shell=True, env=t.env())
         else:
             while t.isAlive():
