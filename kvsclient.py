@@ -200,9 +200,9 @@ class KVSClient(object):
             value = PDS(value)
             encoding = b'PYPK'
         elif encoding is False:
-            # TODO: Is this silent stringification two clever by half?
+            # TODO: Is this silent stringification too clever by half?
             # Maybe, since unicode strings will end up as "u'\\u...'". perhaps utf8-encode strings, and fail on other types?
-            if type(value) is not str and type(value) is not bytes: value = repr(v)
+            if type(value) is not str and type(value) is not bytes: value = repr(value)
             encoding = b'ASTR'
         else:
             if type(encoding) is not bytes:
